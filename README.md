@@ -144,6 +144,7 @@ page --POST (stream)--> frontend nginx --/api--> backend (checks the request)
 - **The backend** (`internal/api`) checks every request first: `wire.PlaygroundRequest.Resolve` fills in the defaults (battery 5 kW, export cap 5 kW, load 15 kWh/day) and rejects anything outside the limits below, with a plain JSON 400. A house that matches a precomputed run on solar, battery kWh, battery kW, export cap and daily load is served from memory. Any other house, when the client asks for a stream, goes to the worker, and the worker's stream is relayed unchanged. Clients that do not ask for a stream, or a backend with no `WORKER_URL`, get the closest precomputed example, as before.
 - **The worker** (`cmd/worker`, `internal/worker`) loads the trained models and the window's data once at startup, then runs the model per request (about a second) and streams `meta`, a `step` per 5 minutes, and `done`. It keeps the last few finished runs for step detail.
 - **Step detail works for any step.** The run id in `X-Run-Id` encodes the house (for example `pv8-b20-bp5-ec5-l15-validation`), so `GET /v1/playground/run/{id}/steps/{i}` can be answered by any worker instance. For a precomputed example, steps without stored detail are explained by the worker too.
+- **Windows:** the worker loads every window that has data in `DATA_DIR`. Both `validation` and `test` are committed, so the `test` window (19 Aug to 9 Sep 2026) also runs live, though the page only asks for `validation`.
 - **Limits** (`internal/wire/params.go`): solar 0 to 100 kW, battery 0 to 200 kWh, battery power 0 to 100 kW, export cap 0 to 100 kW (zero allowed), daily load 0 to 200 kWh.
 - **Errors the page can see:** 400 with a message (bad input), 429 (more than `RATE_LIMIT_PER_MINUTE` live runs a minute from one client, default 12; precomputed houses are not counted), 503 with `Retry-After` (the worker is busy), 502 (the worker is down or failed). If the worker dies part-way through a stream, the stream ends with an `error` event.
 
@@ -157,7 +158,7 @@ page --POST (stream)--> frontend nginx --/api--> backend (checks the request)
 
 ### Run it locally
 
-The worker needs the window's data. `cmd/genrun` downloads it into `backend/data/<window>/` the first time (see below).
+The worker needs each window's data, which is in the repo (`backend/data/validation/` and `backend/data/test/`), so nothing has to be downloaded.
 
 ```sh
 cd backend
@@ -176,9 +177,8 @@ curl -N -X POST localhost:8081/v1/playground/run -H "Accept: application/x-ndjso
 
 The existing backend and frontend deploys do not change. The worker is a second Cloud Run service, built from `backend/Dockerfile.worker` by `backend/cloudbuild.worker.yaml`, and it is private.
 
-1. **Put the data in a bucket.** Upload `backend/data/validation/` (git-ignored, from `cmd/genrun`) to a Cloud Storage bucket so that the bucket's root holds `validation/prices.csv`, and so on. Give the worker's service account `roles/storage.objectViewer` on the bucket.
-2. **Create a Cloud Build trigger** for `backend/cloudbuild.worker.yaml` on `main`, with the included-files filter `backend/internal/**`, `backend/cmd/worker/**`, `backend/Dockerfile.worker*` and `backend/cloudbuild.worker.yaml`, and the substitution `_DATA_BUCKET` set to your bucket. Its service account needs the same roles as the existing triggers (Cloud Run Admin, Service Account User). Run it once. It deploys the service `worker` with 2 CPUs, 2 GiB, concurrency 2 and at most 3 instances, and without public access.
-3. **Let the backend call it.** Give the backend's service account `roles/run.invoker` on the worker, then point the backend at it:
+1. **Create a Cloud Build trigger** for `backend/cloudbuild.worker.yaml` on `main`, with the included-files filter `backend/internal/**`, `backend/cmd/worker/**`, `backend/data/**`, `backend/Dockerfile.worker*` and `backend/cloudbuild.worker.yaml`. Its service account needs the same roles as the existing triggers (Cloud Run Admin, Service Account User). Run it once. It builds the image with the window data inside it (the data is committed, so there is no bucket or other set-up), and deploys the service `worker` with 2 CPUs, 1 GiB, concurrency 2 and at most 3 instances, without public access. Measured locally with the real data: ready in about 150 ms, about 50 MB of memory idle and under 100 MB after several runs.
+2. **Let the backend call it.** Give the backend's service account `roles/run.invoker` on the worker, then point the backend at it:
 
    ```sh
    WORKER=$(gcloud run services describe worker --region europe-west1 --format 'value(status.url)')
@@ -189,7 +189,7 @@ The existing backend and frontend deploys do not change. The worker is a second 
    ```
 
    The backend's own `cloudbuild.yaml` does not set `WORKER_URL`, and Cloud Run keeps it across deploys.
-4. **Check it.** The worker should answer `403` without a token (`curl $WORKER/health`), and a custom house on the page should stream. The first run after the worker has been idle also pays its start-up (loading the models and the data); `--min-instances=1` on the worker avoids that.
+3. **Check it.** The worker should answer `403` without a token (`curl $WORKER/health`), and a custom house on the page should stream. The first run after the worker has been idle also pays its start-up (loading the models and the data); `--min-instances=1` on the worker avoids that.
 
 ## Code layout
 
@@ -229,7 +229,7 @@ go run ./cmd/genrun -window validation -pv 6.6 -battery-kwh 13.5 -load 18   # wr
 go run .
 ```
 
-The first run for a window downloads its data into `backend/data/<window>/` (git-ignored). AEMO's pre-dispatch archives are about 125 MB a week, so this takes a few minutes; `-no-predispatch` skips them, and the price model is then less accurate. After that, a full validation window replays in about a second.
+The data for the two windows is committed in `backend/data/<window>/`, and the live worker reads it. `genrun` downloads a window's data into that folder if it is missing, and replacing it means a commit (about 26 MB of CSV). Do not re-run it for a window that is already there unless you mean to change the data. AEMO's pre-dispatch archives are about 125 MB a week, so this takes a few minutes; `-no-predispatch` skips them, and the price model is then less accurate. After that, a full validation window replays in about a second.
 
 `genrun` flags: `-window validation|test`, `-pv`, `-battery-kwh`, `-battery-kw`, `-load`, `-export-cap`, `-id`, `-wear` (only for `savings_with_wear_aud`), `-detail-every` (default 12: forecast detail is kept for every 12th step, about 3 KB each), `-data`, `-out` and `-curtail forced_only`.
 
