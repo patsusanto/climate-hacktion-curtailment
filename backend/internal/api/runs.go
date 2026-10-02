@@ -16,8 +16,10 @@ type Run struct {
 	ID         string
 	WindowName string // "validation" or "test"
 	Meta       wire.Meta
-	frames     [][]byte       // complete SSE "step" events, indexed by i
+	frames     [][]byte       // complete SSE "step" events (id, event, data), indexed by i
 	done       []byte         // complete SSE "done" event
+	lines      [][]byte       // {"type":"step","tick":{...}} plus a newline, indexed by i
+	doneLine   []byte         // {"type":"done","summary":{...}} plus a newline
 	steps      map[int][]byte // StepDecision JSON by step index (may be sparse)
 }
 
@@ -84,15 +86,22 @@ func parseRun(data []byte) (*Run, error) {
 		WindowName: f.WindowName,
 		Meta:       f.Meta,
 		frames:     make([][]byte, n),
+		lines:      make([][]byte, n),
 		steps:      make(map[int][]byte, len(f.Steps)),
 	}
 
 	for i, raw := range f.Ticks {
 		var idx struct {
-			I int `json:"i"`
+			I    int      `json:"i"`
+			Self *float64 `json:"cumulative_self_aud"`
 		}
 		if err := json.Unmarshal(raw, &idx); err != nil || idx.I != i {
 			return nil, fmt.Errorf("tick at position %d has i=%d", i, idx.I)
+		}
+		// The page draws the self-consumption cost from this field; without it
+		// the chart fills with blanks, so refuse a run that predates it.
+		if idx.Self == nil {
+			return nil, fmt.Errorf("tick %d has no cumulative_self_aud; regenerate the run", i)
 		}
 		// data must be one JSON object with no line breaks inside it
 		var buf bytes.Buffer
@@ -100,6 +109,7 @@ func parseRun(data []byte) (*Run, error) {
 			return nil, err
 		}
 		run.frames[i] = fmt.Appendf(nil, "id: %d\nevent: step\ndata: %s\n\n", i, buf.Bytes())
+		run.lines[i] = fmt.Appendf(nil, `{"type":"step","tick":%s}`+"\n", buf.Bytes())
 	}
 
 	var summary bytes.Buffer
@@ -107,6 +117,7 @@ func parseRun(data []byte) (*Run, error) {
 		return nil, err
 	}
 	run.done = fmt.Appendf(nil, "id: %d\nevent: done\ndata: %s\n\n", n-1, summary.Bytes())
+	run.doneLine = fmt.Appendf(nil, `{"type":"done","summary":%s}`+"\n", summary.Bytes())
 
 	for k, raw := range f.Steps {
 		i, err := strconv.Atoi(k)

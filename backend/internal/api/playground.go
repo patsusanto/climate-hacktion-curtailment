@@ -75,7 +75,117 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	// The address only changes the label; the series itself is precomputed.
 	meta := run.Meta
 	meta.Assumptions.AddressLabel = address
+
+	// The page sends one request and reads the stream from the response: each
+	// line is {"type":"meta"|"step"|"done"|"error", ...}. Other clients get the
+	// run id and metadata as JSON and read /events separately.
+	if format := streamFormat(r.Header.Get("Accept")); format != "" {
+		s.streamRun(w, r, run, meta, format)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"run_id": run.ID, "meta": meta})
+}
+
+const (
+	formatNDJSON = "ndjson"
+	formatSSE    = "sse"
+)
+
+// streamFormat says how to stream to a client, from its Accept header: NDJSON
+// if it asks for it, otherwise SSE if it asks for that, otherwise "" (no stream).
+func streamFormat(accept string) string {
+	accept = strings.ToLower(accept)
+	switch {
+	case strings.Contains(accept, "application/x-ndjson"):
+		return formatNDJSON
+	case strings.Contains(accept, "text/event-stream"):
+		return formatSSE
+	}
+	return ""
+}
+
+// streamRun answers the start request with the whole run as a stream: the
+// metadata, then every step, then the summary. The run id travels in the
+// X-Run-Id header so the page can ask for step detail afterwards.
+//
+// In NDJSON each event is one line of JSON. In SSE each is one "data:" line
+// with nothing else, because the page parses every line it receives.
+func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, run *Run, meta wire.Meta, format string) {
+	f, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported")
+		return
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not encode the run metadata")
+		return
+	}
+
+	h := w.Header()
+	if format == formatSSE {
+		h.Set("Content-Type", "text/event-stream")
+	} else {
+		h.Set("Content-Type", "application/x-ndjson")
+	}
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Accel-Buffering", "no") // stop nginx buffering the stream
+	h.Set("X-Run-Id", run.ID)
+	w.WriteHeader(http.StatusOK)
+
+	// emit writes one event; line is JSON followed by a newline.
+	emit := func(line []byte) error {
+		if format == formatSSE {
+			if _, err := w.Write([]byte("data: ")); err != nil {
+				return err
+			}
+			if _, err := w.Write(line); err != nil {
+				return err
+			}
+			_, err := w.Write([]byte("\n")) // the blank line that ends an SSE event
+			return err
+		}
+		_, err := w.Write(line)
+		return err
+	}
+
+	metaLine := append(append([]byte(`{"type":"meta","meta":`), metaJSON...), "}\n"...)
+	if emit(metaLine) != nil {
+		return
+	}
+	f.Flush() // the page draws its axes as soon as the metadata arrives
+
+	n := len(run.lines)
+	batch, pause := s.pacing(r, n)
+	for i := 0; i < n; {
+		for end := min(i+batch, n); i < end; i++ {
+			if emit(run.lines[i]) != nil {
+				return
+			}
+		}
+		f.Flush()
+		if pause > 0 && i < n {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(pause):
+			}
+		}
+	}
+	if emit(run.doneLine) != nil {
+		return
+	}
+	f.Flush()
+}
+
+// pacing is how many steps to write per flush and how long to wait between
+// flushes, so a full run takes about streamFor. ?speed=max skips the wait.
+func (s *Server) pacing(r *http.Request, n int) (batch int, pause time.Duration) {
+	if r.URL.Query().Get("speed") == "max" {
+		return n, 0
+	}
+	ticks := max(int(s.streamFor/streamTick), 1)
+	return (n + ticks - 1) / ticks, streamTick
 }
 
 // windowName accepts "validation" or "test". Custom {start, end} windows are
@@ -133,11 +243,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		start = last + 1
 	}
 
-	batch, pause := n, time.Duration(0)
-	if r.URL.Query().Get("speed") != "max" {
-		ticks := max(int(s.streamFor/streamTick), 1)
-		batch, pause = (n+ticks-1)/ticks, streamTick
-	}
+	batch, pause := s.pacing(r, n)
 
 	for i := start; i < n; {
 		for end := min(i+batch, n); i < end; i++ {
