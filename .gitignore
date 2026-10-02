@@ -4,8 +4,6 @@
 /prompt-spec.md
 /playground-plan.md
 
-# Public data downloaded by cmd/genrun (prices, pre-dispatch, weather); a cache, re-downloadable
-/backend/data/
 
 # Trained Python model files; they belong with the Python project, not here
 *.joblib
