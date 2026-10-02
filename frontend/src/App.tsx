@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Mascot } from './mascot/Mascot'
 
 export default function App() {
   const [status, setStatus] = useState('checking...')
@@ -12,8 +13,14 @@ export default function App() {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: '2rem' }}>
-      <h1>Climate Hacktion Curtailment</h1>
+      <header style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+        <Mascot size={88} />
+        <h1 style={{ margin: 0 }}>Climate Hacktion Curtailment</h1>
+      </header>
       <p>Backend status: {status}</p>
+      <p>
+        <a href="/playground">Playground</a>
+      </p>
 
       <section>
         <h2>About</h2>
