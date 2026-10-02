@@ -26,11 +26,8 @@ import (
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 )
 
-// Windows are the named replay windows. The models were trained on data before the test window.
-var Windows = map[string][2]time.Time{
-	"validation": {time.Date(2026, 7, 16, 0, 0, 0, 0, data.NEM), time.Date(2026, 8, 18, 23, 55, 0, 0, data.NEM)},
-	"test":       {time.Date(2026, 8, 19, 0, 0, 0, 0, data.NEM), time.Date(2026, 9, 9, 23, 55, 0, 0, data.NEM)},
-}
+// Windows are the named replay windows (see data.Windows).
+var Windows = data.Windows
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, log.Default()); err != nil {
@@ -105,7 +102,7 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 		id = defaultID(*pv, *batteryKwh)
 	}
 	file, err := runfile.Build(res, runfile.Options{ID: id, WindowName: *window, DetailEvery: *detailEvery,
-		WearAUDPerKWh: *wear, TrainedBefore: trainedBefore(models)})
+		WearAUDPerKWh: *wear, TrainedBefore: models.TrainedBefore()})
 	if err != nil {
 		return err
 	}
@@ -125,14 +122,6 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 func defaultID(pv, batteryKwh float64) string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 	return f(pv) + "kw-" + f(batteryKwh) + "kwh"
-}
-
-func trainedBefore(m *forecast.Models) string {
-	t, err := time.Parse("2006-01-02 15:04:05-07:00", m.Meta.TrainedOnDataBefore)
-	if err != nil {
-		return m.Meta.TrainedOnDataBefore
-	}
-	return t.Format("2 Jan 2006")
 }
 
 func complete(dir string, skipPredispatch bool) bool {

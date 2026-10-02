@@ -114,6 +114,15 @@ func floats(fsys fs.FS, name string) ([]float64, error) {
 	return out, nil
 }
 
+// TrainedBefore is the day the models' training data ends, for display ("19 Aug 2026").
+func (m *Models) TrainedBefore() string {
+	t, err := time.Parse("2006-01-02 15:04:05-07:00", m.Meta.TrainedOnDataBefore)
+	if err != nil {
+		return m.Meta.TrainedOnDataBefore
+	}
+	return t.Format("2 Jan 2006")
+}
+
 // Inputs is one download with its house built.
 type Inputs struct {
 	*data.Data
