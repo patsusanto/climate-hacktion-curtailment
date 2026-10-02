@@ -17,6 +17,10 @@ FROM nginx:1.27-alpine
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Where /api/* requests are forwarded (override at runtime)
+# Cloud Run sets PORT (default 8080); nginx listens on it
+ENV PORT=8080
+# Let the entrypoint detect DNS resolvers for runtime backend lookups
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+# Where /api/* requests are forwarded, no trailing slash (override at runtime)
 ENV BACKEND_URL=http://backend:8080
-EXPOSE 80
+EXPOSE 8080
