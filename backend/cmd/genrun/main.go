@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"climate-hacktion-curtailment/backend/internal/data"
-	"climate-hacktion-curtailment/backend/internal/engine"
-	"climate-hacktion-curtailment/backend/internal/forecast"
-	"climate-hacktion-curtailment/backend/internal/split"
+	"climate-hacktion-curtailment/backend/internal/model/data"
+	"climate-hacktion-curtailment/backend/internal/model/engine"
+	"climate-hacktion-curtailment/backend/internal/model/forecast"
+	"climate-hacktion-curtailment/backend/internal/model/split"
 )
 
 func main() {

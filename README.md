@@ -119,16 +119,33 @@ A full stream takes about 25 seconds. Set `STREAM_SECONDS` to change that, or ad
 
 Add `backend/runs/<run_id>.json` with `run_id`, `window_name`, `meta`, `ticks` (one per step, `i` from 0), `summary`, and optionally `steps` (a map from step index to `StepDecision`). The service refuses to start if `ticks` doesn't match `meta.window.n`.
 
+## Code layout
+
+```
+backend/
+  main.go            entry point the Dockerfile builds; embeds runs/ and starts the API
+  runs/              precomputed example runs (JSON), embedded in the binary
+  Dockerfile, cloudbuild.yaml, .dockerignore, go.mod
+  cmd/genrun/        offline command that replays a window and writes a run
+  internal/
+    api/             the HTTP server: routes, validation, SSE streaming
+    wire/            the JSON shapes from interfacespec.md (plain data)
+    model/           house, sim, planner, policy, forecast, data, engine, split, golden
+    compat/          tests that the engine's run files are served by the API
+```
+
+One rule keeps the deployed service small: `internal/api`, `internal/wire` and `main.go` must not import anything under `internal/model/`. `internal/api/boundary_test.go` fails the build if they do. `internal/wire` may import only the standard library.
+
 ## Generating runs with the Go model
 
-The model is implemented in Go in `backend/internal/`, ported from an original Python model that lives outside this repo. It replays a window of history with trained models and writes the run JSON the service serves, so the deployed service never needs the models. Training happens outside this repo.
+The model is implemented in Go in `backend/internal/model/`, ported from an original Python model that lives outside this repo. It replays a window of history with trained models and writes the run JSON the service serves, so the deployed service never needs the models. Training happens outside this repo.
 
 | Package | What it does |
 | --- | --- |
-| `internal/house`, `internal/sim` | House specs, tariffs, battery physics, billing |
-| `internal/planner`, `internal/policy` | The 8-hour dynamic program, the forecast stories, the rule baselines |
-| `internal/forecast` | Features, XGBoost price quantiles, the PV/load net |
-| `internal/engine`, `cmd/genrun` | The replay and the run-file writer |
+| `internal/model/house`, `internal/model/sim` | House specs, tariffs, battery physics, billing |
+| `internal/model/planner`, `internal/model/policy` | The 8-hour dynamic program, the forecast stories, the rule baselines |
+| `internal/model/forecast`, `internal/model/data` | Features, XGBoost price quantiles, the PV/load net; loading the export |
+| `internal/model/engine`, `cmd/genrun` | The replay and the run-file writer |
 
 **1. Provide an export** in `backend/export/` (git-ignored):
 
@@ -137,17 +154,17 @@ The model is implemented in Go in `backend/internal/`, ported from an original P
 | `manifest.json` | `{"price": {"quantiles": [0.1, 0.5, 0.9], "feature_columns": {"12": [...]}, "models": {"12": ["price/lead12_q10.json", ...]}}, "units": "unit_model.json", "weather": "weather.csv.gz"}`, with an entry for each lead: 12, 24, 36, 72, 96 |
 | `price/lead{L}_q{Q}.json` | One XGBoost booster per lead and quantile, saved with `Booster.save_model("x.json")` and cut to the early-stopping best round (`booster[:best_iteration + 1]`) |
 | `unit_model.json` | The PV/load net: `input_dim`, `output_dim`, `feature_columns`, `layers` (`[{"w": [[...]], "b": [...]}]`, ReLU between layers), `scaler_x` and `scaler_y` (`{"mean", "scale"}`), `residuals` (`{"pv_unit": {"12": {"p10", "p90"}}, "load_unit": {...}}`). Outputs are PV units at each lead, then load units at each lead |
-| `weather.csv.gz` | Hourly day-ahead forecast: `time` plus the seven `fc_*` columns listed in `internal/forecast/features.go` |
+| `weather.csv.gz` | Hourly day-ahead forecast: `time` plus the seven `fc_*` columns listed in `internal/model/forecast/features.go` |
 | `frame.csv.gz` | `time,price_aud_mwh,pv_unit,load_unit` every 5 minutes with no gaps |
 | `golden.json` (optional) | Reference answers from the original model; see step 2 |
 
-Times are RFC 3339 with a `+10:00` offset. Feature names are those of feature set v2 (`internal/forecast/features.go`). A window needs a week and an hour of history before it.
+Times are RFC 3339 with a `+10:00` offset. Feature names are those of feature set v2 (`internal/model/forecast/features.go`). A window needs a week and an hour of history before it.
 
-**2. Check the Go port against reference answers (optional).** If the export includes `golden.json` (features, forecast curves, planner decisions and a replay from the original model; the shape is in `internal/golden/golden_test.go`):
+**2. Check the Go port against reference answers (optional).** If the export includes `golden.json` (features, forecast curves, planner decisions and a replay from the original model; the shape is in `internal/model/golden/golden_test.go`):
 
 ```sh
 cd backend
-go test ./internal/golden -v
+go test ./internal/model/golden -v
 ```
 
 These tests are skipped when there is no `golden.json`. They require at least 99.5% of replay actions to agree and bills within 0.02 AUD.

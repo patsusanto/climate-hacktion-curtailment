@@ -1,46 +1,36 @@
+// Command server is the playground API. It is the entry point the Dockerfile
+// builds (go build .), so it stays in the backend root; the code lives in
+// internal/api.
 package main
 
 import (
-	"encoding/json"
+	"embed"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+
+	"climate-hacktion-curtailment/backend/internal/api"
 )
 
-func (s *server) routes() *http.ServeMux {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello, World!"))
-	})
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
-
-	mux.HandleFunc("POST /v1/playground/run", s.startRun)
-	mux.HandleFunc("GET /v1/playground/run/{id}/events", s.events)
-	mux.HandleFunc("GET /v1/playground/run/{id}/steps/{i}", s.step)
-
-	return mux
-}
+// Precomputed example runs, baked into the binary and loaded at startup.
+//
+//go:embed runs/*.json
+var runsFS embed.FS
 
 func main() {
-	runs, err := loadRuns(runsFS, "runs")
+	// STREAM_SECONDS sets how long a full run takes to stream.
+	streamFor := api.DefaultStreamFor
+	if v, err := strconv.Atoi(os.Getenv("STREAM_SECONDS")); err == nil && v > 0 {
+		streamFor = time.Duration(v) * time.Second
+	}
+
+	srv, err := api.New(runsFS, "runs", streamFor)
 	if err != nil {
 		log.Fatalf("loading runs: %v", err)
 	}
-	log.Printf("loaded %d run(s)", len(runs))
-
-	// STREAM_SECONDS sets how long a full run takes to stream.
-	secs := defaultStreamS
-	if v, err := strconv.Atoi(os.Getenv("STREAM_SECONDS")); err == nil && v > 0 {
-		secs = v
-	}
-	s := &server{runs: runs, streamFor: time.Duration(secs) * time.Second}
+	log.Printf("loaded %d run(s)", srv.RunCount())
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -48,5 +38,5 @@ func main() {
 	}
 
 	log.Printf("listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
+	log.Fatal(http.ListenAndServe(":"+port, srv.Routes()))
 }

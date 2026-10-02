@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"climate-hacktion-curtailment/backend/internal/split"
+	"climate-hacktion-curtailment/backend/internal/model/split"
 )
 
 const layout = "2006-01-02T15:04:05-07:00"
