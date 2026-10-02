@@ -3,3 +3,10 @@
 /playgroundrequirement.md
 /prompt-spec.md
 /playground-plan.md
+
+# Python model: trained artifacts, data and eval snapshots (paths the code reads and writes)
+/backend/app/artifacts/
+/backend/app/data/
+/backend/app/results/
+__pycache__/
+*.pyc
