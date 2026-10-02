@@ -1,5 +1,8 @@
 // Package runfile turns a replay (simulate.Result) into the run file the playground service
 // serves: backend/runs/<run_id>.json, in the shapes of internal/wire.
+//
+// Build packages a finished replay. The pieces it is made of (Meta, Ticker, StepDecision and
+// Summary) are exported so a live run can send them one at a time as the replay goes.
 package runfile
 
 import (
@@ -11,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"climate-hacktion-curtailment/backend/internal/model/battery"
 	"climate-hacktion-curtailment/backend/internal/model/house"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/wire"
@@ -25,6 +29,115 @@ type Options struct {
 	TrainedBefore string  // shown in the note, e.g. "19 Aug 2026"
 }
 
+// Meta is the run's metadata, which a live run sends before the first step. start and end are
+// the first and last intervals of the window, and n the number of 5-minute steps between them.
+func Meta(spec battery.Spec, start, end time.Time, n int, opt Options) wire.Meta {
+	return wire.Meta{
+		Assumptions: wire.Assumptions{
+			PriceRegion: "NSW1",
+			PriceSource: "historical_spot",
+			Roof:        "sydney_observed_weather_scaled_by_pv_kw_ac",
+			Load:        "evening_peak_synthetic",
+			Lat:         house.Lat,
+			Lon:         house.Lon,
+			Note: "The house runs on Sydney's observed weather and NSW1 spot prices whatever the address. " +
+				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + ".",
+		},
+		Spec: wire.Spec{
+			PvKwAc:               spec.PVkWAC,
+			ExportCapKw:          spec.ExportCapKW,
+			BatteryKwh:           spec.CapacityKWh,
+			BatteryKw:            spec.MaxPowerKW,
+			UsableKwh:            round(spec.Usable(), 4),
+			DailyLoadKwh:         spec.DailyLoadKWh,
+			DegradationAudPerKwh: spec.WearAUDPerKWh,
+		},
+		Window: wire.Window{
+			Start:       stamp(start),
+			End:         stamp(end),
+			StepMinutes: 5,
+			N:           n,
+		},
+	}
+}
+
+// Ticker turns settled steps into ticks, in order, keeping the running cost of each strategy.
+type Ticker struct{ cumSelf, cumPlanner float64 }
+
+// Tick is step i's tick.
+func (t *Ticker) Tick(i int, s simulate.Step) wire.Tick {
+	cash := s.Planner.Cash(s.Price)
+	t.cumPlanner += cash
+	t.cumSelf += s.Self.Cash(s.Price)
+	return wire.Tick{
+		I:                    i,
+		T:                    stamp(s.Time),
+		PriceAudMwh:          round(s.Price, 3),
+		PriceEstP10:          round(s.EstPrice[0], 3),
+		PriceEstP50:          round(s.EstPrice[1], 3),
+		PriceEstP90:          round(s.EstPrice[2], 3),
+		PvKw:                 round(s.PVkW, 4),
+		PvEstKw:              round(s.EstPVkW, 4),
+		LoadKw:               round(s.LoadkW, 4),
+		LoadEstKw:            round(s.EstLoadkW, 4),
+		Action:               string(s.Planner.Action),
+		SocKwh:               round(s.Planner.SOC, 4),
+		GridImportKwh:        round(s.Planner.GridImport, 5),
+		GridExportKwh:        round(s.Planner.GridExport, 5),
+		EnergyCashAud:        round(cash, 5),
+		CumulativeSelfAud:    round(t.cumSelf, 4),
+		CumulativeSavingsAud: round(t.cumSelf-t.cumPlanner, 4),
+	}
+}
+
+// StepDecision is the forecast detail for step i of a finished replay.
+func StepDecision(res *simulate.Result, i int) (wire.StepDecision, error) {
+	d, err := res.Detail(i)
+	if err != nil {
+		return wire.StepDecision{}, err
+	}
+	s := res.Steps[i]
+	decision := wire.StepDecision{
+		T:      stamp(s.Time),
+		Action: string(s.Planner.Action),
+		Measured: wire.Measured{
+			PriceAudMwh: round(s.Price, 3),
+			PvKw:        round(d.PVPath[0], 4), // the last measured interval: what the planner knew
+			LoadKw:      round(d.LoadPath[0], 4),
+			SocKwh:      round(s.SOCBefore, 4),
+		},
+		EnergyCashAud: round(s.Planner.Cash(s.Price), 5),
+		Stories: []wire.Story{{
+			ID: "mid", Count: 1,
+			PriceAudMwh: roundAll(d.PricePath, 2),
+			PvKw:        roundAll(d.PVPath, 3),
+			LoadKw:      roundAll(d.LoadPath, 3),
+		}},
+	}
+	for _, l := range d.Leads {
+		decision.Leads = append(decision.Leads, wire.Lead{
+			LeadSteps: l.Steps,
+			PriceP10:  round(l.Price[0], 3), PriceP50: round(l.Price[1], 3), PriceP90: round(l.Price[2], 3),
+			PvKw: round(l.PVkW, 4), PvLo: round(l.PVLow, 4), PvHi: round(l.PVHigh, 4),
+			LoadKw: round(l.LoadkW, 4), LoadLo: round(l.LoadLow, 4), LoadHi: round(l.LoadHigh, 4),
+		})
+	}
+	return decision, nil
+}
+
+// Summary is the last event of a run: both bills and the savings.
+func Summary(res *simulate.Result, opt Options) wire.Summary {
+	p, sc := res.Planner, res.Self
+	return wire.Summary{
+		SelfConsumption: bill(sc.BillAUD, sc.EnergyCashAUD, sc.Clipped, sc.Throughput(), sc.GridImport, sc.GridExport),
+		Planner:         bill(p.BillAUD, p.EnergyCashAUD, p.Clipped, p.Throughput(), p.GridImport, p.GridExport),
+		SavingsAud:      round(sc.BillAUD-p.BillAUD, 4),
+		SavingsWithWearAud: round((sc.BillAUD+opt.WearAUDPerKWh*sc.Throughput())-
+			(p.BillAUD+opt.WearAUDPerKWh*p.Throughput()), 4),
+		SupplyAud: round(p.BillAUD-p.EnergyCashAUD-p.Throughput()*res.Spec.WearAUDPerKWh, 4),
+	}
+}
+
 // Build packages a finished replay.
 func Build(res *simulate.Result, opt Options) (wire.RunFile, error) {
 	if len(res.Steps) == 0 {
@@ -33,108 +146,26 @@ func Build(res *simulate.Result, opt Options) (wire.RunFile, error) {
 	if opt.DetailEvery <= 0 {
 		opt.DetailEvery = 1
 	}
-	spec := res.Spec
+	last := len(res.Steps) - 1
 	run := wire.RunFile{
 		RunID:      opt.ID,
 		WindowName: opt.WindowName,
-		Meta: wire.Meta{
-			Assumptions: wire.Assumptions{
-				PriceRegion: "NSW1",
-				PriceSource: "historical_spot",
-				Roof:        "sydney_observed_weather_scaled_by_pv_kw_ac",
-				Load:        "evening_peak_synthetic",
-				Lat:         house.Lat,
-				Lon:         house.Lon,
-				Note: "The house runs on Sydney's observed weather and NSW1 spot prices whatever the address. " +
-					"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + ".",
-			},
-			Spec: wire.Spec{
-				PvKwAc:               spec.PVkWAC,
-				ExportCapKw:          spec.ExportCapKW,
-				BatteryKwh:           spec.CapacityKWh,
-				BatteryKw:            spec.MaxPowerKW,
-				UsableKwh:            round(spec.Usable(), 4),
-				DailyLoadKwh:         spec.DailyLoadKWh,
-				DegradationAudPerKwh: spec.WearAUDPerKWh,
-			},
-			Window: wire.Window{
-				Start:       stamp(res.Steps[0].Time),
-				End:         stamp(res.Steps[len(res.Steps)-1].Time),
-				StepMinutes: 5,
-				N:           len(res.Steps),
-			},
-		},
-		Steps: map[string]wire.StepDecision{},
+		Meta:       Meta(res.Spec, res.Steps[0].Time, res.Steps[last].Time, len(res.Steps), opt),
+		Steps:      map[string]wire.StepDecision{},
 	}
-
-	var cumSelf, cumPlanner float64
+	var ticker Ticker
 	for i, s := range res.Steps {
-		cash := s.Planner.Cash(s.Price)
-		cumPlanner += cash
-		cumSelf += s.Self.Cash(s.Price)
-		run.Ticks = append(run.Ticks, wire.Tick{
-			I:                    i,
-			T:                    stamp(s.Time),
-			PriceAudMwh:          round(s.Price, 3),
-			PriceEstP10:          round(s.EstPrice[0], 3),
-			PriceEstP50:          round(s.EstPrice[1], 3),
-			PriceEstP90:          round(s.EstPrice[2], 3),
-			PvKw:                 round(s.PVkW, 4),
-			PvEstKw:              round(s.EstPVkW, 4),
-			LoadKw:               round(s.LoadkW, 4),
-			LoadEstKw:            round(s.EstLoadkW, 4),
-			Action:               string(s.Planner.Action),
-			SocKwh:               round(s.Planner.SOC, 4),
-			GridImportKwh:        round(s.Planner.GridImport, 5),
-			GridExportKwh:        round(s.Planner.GridExport, 5),
-			EnergyCashAud:        round(cash, 5),
-			CumulativeSelfAud:    round(cumSelf, 4),
-			CumulativeSavingsAud: round(cumSelf-cumPlanner, 4),
-		})
+		run.Ticks = append(run.Ticks, ticker.Tick(i, s))
 		if i%opt.DetailEvery != 0 {
 			continue
 		}
-		d, err := res.Detail(i)
+		decision, err := StepDecision(res, i)
 		if err != nil {
 			return wire.RunFile{}, err
 		}
-		decision := wire.StepDecision{
-			T:      stamp(s.Time),
-			Action: string(s.Planner.Action),
-			Measured: wire.Measured{
-				PriceAudMwh: round(s.Price, 3),
-				PvKw:        round(d.PVPath[0], 4), // the last measured interval: what the planner knew
-				LoadKw:      round(d.LoadPath[0], 4),
-				SocKwh:      round(s.SOCBefore, 4),
-			},
-			EnergyCashAud: round(cash, 5),
-			Stories: []wire.Story{{
-				ID: "mid", Count: 1,
-				PriceAudMwh: roundAll(d.PricePath, 2),
-				PvKw:        roundAll(d.PVPath, 3),
-				LoadKw:      roundAll(d.LoadPath, 3),
-			}},
-		}
-		for _, l := range d.Leads {
-			decision.Leads = append(decision.Leads, wire.Lead{
-				LeadSteps: l.Steps,
-				PriceP10:  round(l.Price[0], 3), PriceP50: round(l.Price[1], 3), PriceP90: round(l.Price[2], 3),
-				PvKw: round(l.PVkW, 4), PvLo: round(l.PVLow, 4), PvHi: round(l.PVHigh, 4),
-				LoadKw: round(l.LoadkW, 4), LoadLo: round(l.LoadLow, 4), LoadHi: round(l.LoadHigh, 4),
-			})
-		}
 		run.Steps[strconv.Itoa(i)] = decision
 	}
-
-	p, sc := res.Planner, res.Self
-	run.Summary = wire.Summary{
-		SelfConsumption: bill(sc.BillAUD, sc.EnergyCashAUD, sc.Clipped, sc.Throughput(), sc.GridImport, sc.GridExport),
-		Planner:         bill(p.BillAUD, p.EnergyCashAUD, p.Clipped, p.Throughput(), p.GridImport, p.GridExport),
-		SavingsAud:      round(sc.BillAUD-p.BillAUD, 4),
-		SavingsWithWearAud: round((sc.BillAUD+opt.WearAUDPerKWh*sc.Throughput())-
-			(p.BillAUD+opt.WearAUDPerKWh*p.Throughput()), 4),
-		SupplyAud: round(p.BillAUD-p.EnergyCashAUD-p.Throughput()*spec.WearAUDPerKWh, 4),
-	}
+	run.Summary = Summary(res, opt)
 	return run, nil
 }
 
