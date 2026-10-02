@@ -4,9 +4,5 @@
 /prompt-spec.md
 /playground-plan.md
 
-# Python model: trained artifacts, data and eval snapshots (paths the code reads and writes)
-/backend/app/artifacts/
-/backend/app/data/
-/backend/app/results/
-__pycache__/
-*.pyc
+# An export supplied for the Go engine: models, history, weather, golden vectors (see README)
+/backend/export/
