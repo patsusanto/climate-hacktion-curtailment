@@ -103,11 +103,21 @@ The backend serves precomputed example runs from `backend/runs/*.json` (embedded
 
 | Route | Description |
 | --- | --- |
-| `POST /v1/playground/run` | Body is a `PlaygroundRequest` (see `interfacespec.md`). Returns `{run_id, meta}` as JSON. |
-| `GET /v1/playground/run/{run_id}/events` | Server-Sent Events: `step` events in order of `i`, then one `done` with the summary. Send `Last-Event-ID` to resume. An unknown id sends `event: error`. |
+| `POST /v1/playground/run` | Body is a `PlaygroundRequest` (see `interfacespec.md`). With `Accept: application/x-ndjson` or `text/event-stream` (what the frontend sends) the response **is the stream**: a `meta` event, one `step` event per 5 minutes, then `done`, with the run id in the `X-Run-Id` header. Without those `Accept` values it returns `{run_id, meta}` as JSON. A bad request gets a plain JSON `{"message": ...}` with status 400, before any stream starts. |
+| `GET /v1/playground/run/{run_id}/events` | The two-step alternative: Server-Sent Events with `id:`, `event:` and a raw `data:` per step, then `done`. Send `Last-Event-ID` to resume. An unknown id sends `event: error`. |
 | `GET /v1/playground/run/{run_id}/steps/{i}` | `StepDecision` (forecast leads and stories) for one step. Returns 404 for steps with no stored detail. |
 
+**Stream format (the `POST` route).** Each event is a JSON object with a `type`: `{"type":"meta","meta":{...}}`, `{"type":"step","tick":{...}}`, `{"type":"done","summary":{...}}` or `{"type":"error","message":"..."}`. In NDJSON each event is one line. In SSE each is a single `data: {...}` line followed by a blank line, with no `id:` or `event:` lines, because the page parses every line it receives. If the client offers both formats, NDJSON is used.
+
+Each tick carries `cumulative_self_aud` (the self-consumption energy cost so far; positive means paid) next to `cumulative_savings_aud`. The planner's cost so far is the difference of the two. A run file without it is refused at startup.
+
 ```sh
+# what the frontend does: one request, and the response is the stream
+curl -N -X POST "localhost:8080/v1/playground/run?speed=max" \
+  -H "Accept: application/x-ndjson" -H "Content-Type: application/json" \
+  -d '{"address":"1 Example St, Sydney","pv_kw_ac":10.5,"battery_kwh":10,"window":"validation"}'
+
+# the two-step flow: JSON first, then the events
 curl -X POST localhost:8080/v1/playground/run \
   -d '{"address":"1 Example St, Sydney","pv_kw_ac":10.5,"battery_kwh":10,"window":"validation"}'
 curl -N localhost:8080/v1/playground/run/10kw-10kwh/events
@@ -117,7 +127,7 @@ A full stream takes about 25 seconds. Set `STREAM_SECONDS` to change that, or ad
 
 ### Adding a run
 
-Add `backend/runs/<run_id>.json` with `run_id`, `window_name`, `meta`, `ticks` (one per step, `i` from 0), `summary`, and optionally `steps` (a map from step index to `StepDecision`). The service refuses to start if `ticks` doesn't match `meta.window.n`.
+Add `backend/runs/<run_id>.json` with `run_id`, `window_name`, `meta`, `ticks` (one per step, `i` from 0), `summary`, and optionally `steps` (a map from step index to `StepDecision`). The service refuses to start if `ticks` doesn't match `meta.window.n`, or if a tick has no `cumulative_self_aud`.
 
 ## Code layout
 
