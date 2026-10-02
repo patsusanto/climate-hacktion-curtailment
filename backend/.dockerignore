@@ -2,3 +2,7 @@
 Dockerfile
 .dockerignore
 *.md
+# Exports and tooling are not needed to serve the precomputed runs
+export
+cmd
+**/*_test.go

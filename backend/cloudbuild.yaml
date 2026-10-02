@@ -26,6 +26,8 @@ steps:
       - --image=${_IMAGE}
       - --region=${_REGION}
       - --allow-unauthenticated
+      # Long enough for the playground event stream
+      - --timeout=900
 
 options:
   # Lets _IMAGE reference the other substitutions
