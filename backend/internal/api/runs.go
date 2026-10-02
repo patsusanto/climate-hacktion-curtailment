@@ -147,3 +147,12 @@ func pickRun(runs map[string]*Run, window string, pvKw, batteryKwh float64) *Run
 	}
 	return best
 }
+
+// params is the house and window this run was made for, as the model worker would be asked for it.
+func (r *Run) params() wire.Params {
+	sp := r.Meta.Spec
+	return wire.Params{
+		PvKwAc: sp.PvKwAc, BatteryKwh: sp.BatteryKwh, BatteryKw: sp.BatteryKw,
+		ExportCapKw: sp.ExportCapKw, DailyLoadKwh: sp.DailyLoadKwh, Window: r.WindowName,
+	}
+}

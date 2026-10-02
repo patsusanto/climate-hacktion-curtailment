@@ -22,8 +22,8 @@ func TestServedBinaryDoesNotDependOnTheModel(t *testing.T) {
 			t.Fatalf("go list -deps %s: %v\n%s", pkg, err, out)
 		}
 		for _, path := range strings.Fields(string(out)) {
-			if strings.Contains(path, "/internal/model/") {
-				t.Errorf("%s depends on %s; the API side must not import the model", pkg, path)
+			if strings.Contains(path, "/internal/model/") || strings.HasSuffix(path, "/internal/worker") {
+				t.Errorf("%s depends on %s; the API side must not import the model or the worker, it calls the worker over HTTP", pkg, path)
 			}
 		}
 	}
