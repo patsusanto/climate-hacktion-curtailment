@@ -15,6 +15,13 @@ import (
 // NEM is the market's clock: UTC+10, no daylight saving.
 var NEM = time.FixedZone("NEM", 10*3600)
 
+// Windows are the named replay windows: the first and last interval of each. The models were
+// trained on data before the test window.
+var Windows = map[string][2]time.Time{
+	"validation": {time.Date(2026, 7, 16, 0, 0, 0, 0, NEM), time.Date(2026, 8, 18, 23, 55, 0, 0, NEM)},
+	"test":       {time.Date(2026, 8, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 9, 23, 55, 0, 0, NEM)},
+}
+
 // Step is one market interval, in seconds.
 const Step = 300
 

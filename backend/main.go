@@ -26,11 +26,21 @@ func main() {
 		streamFor = time.Duration(v) * time.Second
 	}
 
-	srv, err := api.New(runsFS, "runs", streamFor)
-	if err != nil {
-		log.Fatalf("loading runs: %v", err)
+	// WORKER_URL is the model worker. With it, houses that are not precomputed are run live;
+	// without it every request is answered from the precomputed runs.
+	var opts []api.Option
+	if url := os.Getenv("WORKER_URL"); url != "" {
+		opts = append(opts, api.WithWorker(url))
 	}
-	log.Printf("loaded %d run(s)", srv.RunCount())
+	if v, err := strconv.Atoi(os.Getenv("RATE_LIMIT_PER_MINUTE")); err == nil && v >= 0 {
+		opts = append(opts, api.WithRateLimit(v))
+	}
+
+	srv, err := api.New(runsFS, "runs", streamFor, opts...)
+	if err != nil {
+		log.Fatalf("starting: %v", err)
+	}
+	log.Printf("loaded %d run(s); live runs: %v", srv.RunCount(), srv.Live())
 
 	port := os.Getenv("PORT")
 	if port == "" {

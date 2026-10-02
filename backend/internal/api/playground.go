@@ -5,17 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"climate-hacktion-curtailment/backend/internal/wire"
 )
 
 const (
-	maxBodyBytes  = 16 << 10
-	maxAddressLen = 200
-	streamTick    = 50 * time.Millisecond
+	maxBodyBytes = 16 << 10
+	streamTick   = 50 * time.Millisecond
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -29,6 +26,12 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // POST /v1/playground/run
+//
+// The request is checked here, for every kind of client. Then:
+//   - a house that is exactly one of the precomputed examples is served from memory;
+//   - the page (it asks for a stream) gets a live run of any other house, if a model worker is
+//     set up;
+//   - anyone else, or everyone when there is no worker, gets the closest example.
 func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	var req wire.PlaygroundRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
@@ -36,73 +39,57 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-
-	address := strings.TrimSpace(req.Address)
-	switch {
-	case address == "":
-		writeError(w, http.StatusBadRequest, "address is required")
-		return
-	case utf8.RuneCountInString(address) > maxAddressLen:
-		writeError(w, http.StatusBadRequest, "address is too long")
-		return
-	case req.PvKwAc <= 0:
-		writeError(w, http.StatusBadRequest, "pv_kw_ac must be greater than 0")
-		return
-	case req.BatteryKwh < 0:
-		writeError(w, http.StatusBadRequest, "battery_kwh must not be negative")
-		return
-	}
-	for name, v := range map[string]*float64{
-		"battery_kw": req.BatteryKw, "export_cap_kw": req.ExportCapKw, "daily_load_kwh": req.DailyLoadKwh,
-	} {
-		if v != nil && *v < 0 {
-			writeError(w, http.StatusBadRequest, name+" must not be negative")
-			return
-		}
-	}
-
-	window, err := windowName(req.Window)
+	p, err := req.Resolve()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	run := pickRun(s.runs, window, req.PvKwAc, req.BatteryKwh)
+	format := wire.StreamFormat(r.Header.Get("Accept"))
+
+	run := s.exactRun(p)
+	if run == nil && format != "" && s.live != nil {
+		s.liveRun(w, r, p, format)
+		return
+	}
 	if run == nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("no example run available for window %q", window))
+		run = pickRun(s.runs, p.Window, p.PvKwAc, p.BatteryKwh)
+	}
+	if run == nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("no example run available for window %q", p.Window))
 		return
 	}
 
 	// The address only changes the label; the series itself is precomputed.
 	meta := run.Meta
-	meta.Assumptions.AddressLabel = address
+	meta.Assumptions.AddressLabel = p.Address
 
 	// The page sends one request and reads the stream from the response: each
 	// line is {"type":"meta"|"step"|"done"|"error", ...}. Other clients get the
 	// run id and metadata as JSON and read /events separately.
-	if format := streamFormat(r.Header.Get("Accept")); format != "" {
+	if format != "" {
 		s.streamRun(w, r, run, meta, format)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run_id": run.ID, "meta": meta})
 }
 
+// exactRun is the precomputed example for exactly this house and window, or nil.
+func (s *Server) exactRun(p wire.Params) *Run {
+	for _, run := range s.runs {
+		if run.params() == p.House() {
+			return run
+		}
+	}
+	return nil
+}
+
+// Aliases, so the names the rest of the package uses keep working.
 const (
-	formatNDJSON = "ndjson"
-	formatSSE    = "sse"
+	formatNDJSON = wire.FormatNDJSON
+	formatSSE    = wire.FormatSSE
 )
 
-// streamFormat says how to stream to a client, from its Accept header: NDJSON
-// if it asks for it, otherwise SSE if it asks for that, otherwise "" (no stream).
-func streamFormat(accept string) string {
-	accept = strings.ToLower(accept)
-	switch {
-	case strings.Contains(accept, "application/x-ndjson"):
-		return formatNDJSON
-	case strings.Contains(accept, "text/event-stream"):
-		return formatSSE
-	}
-	return ""
-}
+func streamFormat(accept string) string { return wire.StreamFormat(accept) }
 
 // streamRun answers the start request with the whole run as a stream: the
 // metadata, then every step, then the summary. The run id travels in the
@@ -116,41 +103,18 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, run *Run, met
 		writeError(w, http.StatusInternalServerError, "streaming is not supported")
 		return
 	}
-	metaJSON, err := json.Marshal(meta)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not encode the run metadata")
-		return
-	}
+	metaLine := wire.MetaLine(meta)
 
 	h := w.Header()
-	if format == formatSSE {
-		h.Set("Content-Type", "text/event-stream")
-	} else {
-		h.Set("Content-Type", "application/x-ndjson")
-	}
+	h.Set("Content-Type", wire.ContentType(format))
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no") // stop nginx buffering the stream
 	h.Set("X-Run-Id", run.ID)
 	w.WriteHeader(http.StatusOK)
 
-	// emit writes one event; line is JSON followed by a newline.
-	emit := func(line []byte) error {
-		if format == formatSSE {
-			if _, err := w.Write([]byte("data: ")); err != nil {
-				return err
-			}
-			if _, err := w.Write(line); err != nil {
-				return err
-			}
-			_, err := w.Write([]byte("\n")) // the blank line that ends an SSE event
-			return err
-		}
-		_, err := w.Write(line)
-		return err
-	}
+	emit := func(line []byte) bool { _, err := w.Write(wire.Encode(format, line)); return err == nil }
 
-	metaLine := append(append([]byte(`{"type":"meta","meta":`), metaJSON...), "}\n"...)
-	if emit(metaLine) != nil {
+	if !emit(metaLine) {
 		return
 	}
 	f.Flush() // the page draws its axes as soon as the metadata arrives
@@ -159,7 +123,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, run *Run, met
 	batch, pause := s.pacing(r, n)
 	for i := 0; i < n; {
 		for end := min(i+batch, n); i < end; i++ {
-			if emit(run.lines[i]) != nil {
+			if !emit(run.lines[i]) {
 				return
 			}
 		}
@@ -172,7 +136,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, run *Run, met
 			}
 		}
 	}
-	if emit(run.doneLine) != nil {
+	if !emit(run.doneLine) {
 		return
 	}
 	f.Flush()
@@ -186,26 +150,6 @@ func (s *Server) pacing(r *http.Request, n int) (batch int, pause time.Duration)
 	}
 	ticks := max(int(s.streamFor/streamTick), 1)
 	return (n + ticks - 1) / ticks, streamTick
-}
-
-// windowName accepts "validation" or "test". Custom {start, end} windows are
-// not supported yet because runs are precomputed.
-func windowName(raw json.RawMessage) (string, error) {
-	var name string
-	if json.Unmarshal(raw, &name) == nil {
-		if name == "validation" || name == "test" {
-			return name, nil
-		}
-		return "", fmt.Errorf(`window must be "validation" or "test"`)
-	}
-	var custom struct {
-		Start string `json:"start"`
-		End   string `json:"end"`
-	}
-	if json.Unmarshal(raw, &custom) == nil && custom.Start != "" && custom.End != "" {
-		return "", fmt.Errorf("custom windows are not supported yet; use \"validation\" or \"test\"")
-	}
-	return "", fmt.Errorf(`window must be "validation", "test" or {"start","end"}`)
 }
 
 func sseError(w http.ResponseWriter, f http.Flusher, msg string) {
@@ -267,22 +211,36 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /v1/playground/run/{id}/steps/{i}
+//
+// A step with stored detail is answered from memory. Any other step of an example, and the
+// steps of a live run (the id comes from the X-Run-Id header of the live stream), are asked of
+// the model worker, which can explain any step.
 func (s *Server) step(w http.ResponseWriter, r *http.Request) {
-	run := s.runs[r.PathValue("id")]
+	id, stepParam := r.PathValue("id"), r.PathValue("i")
+	run := s.runs[id]
 	if run == nil {
+		if s.live != nil {
+			if p, err := wire.ParseID(id); err == nil {
+				s.liveStep(w, r, p, stepParam)
+				return
+			}
+		}
 		writeError(w, http.StatusNotFound, "unknown run_id")
 		return
 	}
-	i, err := strconv.Atoi(r.PathValue("i"))
+	i, err := strconv.Atoi(stepParam)
 	if err != nil || i < 0 || i >= len(run.frames) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("step must be an integer from 0 to %d", len(run.frames)-1))
 		return
 	}
-	detail, ok := run.steps[i]
-	if !ok {
-		writeError(w, http.StatusNotFound, "no forecast detail stored for this step")
+	if detail, ok := run.steps[i]; ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(detail)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(detail)
+	if s.live != nil {
+		s.liveStep(w, r, run.params(), stepParam)
+		return
+	}
+	writeError(w, http.StatusNotFound, "no forecast detail stored for this step")
 }
