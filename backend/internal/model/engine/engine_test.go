@@ -331,3 +331,51 @@ func TestRunFileRoundTrip(t *testing.T) {
 		t.Error("a run without an id must not be written")
 	}
 }
+
+// cumulative_self_aud is the self-consumption cost so far. It must agree with
+// the baseline's own bill, with the savings, and with the summary.
+func TestReplayCumulativeSelfCost(t *testing.T) {
+	f := synthFrame(14)
+	cfg := DefaultConfig()
+	start := forecast.MaxLookbackV2 + 288
+	res := replay(t, cfg, f, start, 288*2)
+
+	// the page shows the planner's cost as self - savings, so that must equal
+	// the planner's own running energy cost
+	plannerCost := 0.0
+	for _, tk := range res.Ticks {
+		plannerCost += tk.EnergyCashAud
+		if d := (tk.CumulativeSelfAud - tk.CumulativeSavingsAud) - plannerCost; math.Abs(d) > 0.01 {
+			t.Fatalf("tick %d: self %v - savings %v = %v, planner cost so far %v",
+				tk.I, tk.CumulativeSelfAud, tk.CumulativeSavingsAud, tk.CumulativeSelfAud-tk.CumulativeSavingsAud, plannerCost)
+		}
+	}
+
+	// at the end it is the baseline's energy cost, and its bill adds supply
+	last := res.Ticks[len(res.Ticks)-1]
+	if d := last.CumulativeSelfAud - res.Summary.SelfConsumption.EnergyCashAud; math.Abs(d) > 0.01 {
+		t.Errorf("last self cost %v vs baseline energy cash %v", last.CumulativeSelfAud, res.Summary.SelfConsumption.EnergyCashAud)
+	}
+	if d := res.Summary.SelfConsumption.BillAud - (last.CumulativeSelfAud + res.Summary.SupplyAud); math.Abs(d) > 0.01 {
+		t.Errorf("baseline bill %v != self cost %v + supply %v", res.Summary.SelfConsumption.BillAud, last.CumulativeSelfAud, res.Summary.SupplyAud)
+	}
+
+	// and it moves: it is not a copy of the savings or a constant
+	if res.Ticks[0].CumulativeSelfAud == last.CumulativeSelfAud {
+		t.Error("cumulative_self_aud never changed")
+	}
+}
+
+// With wear on, both policies' costs include it, so the identity still holds.
+func TestReplayCumulativeSelfIncludesWear(t *testing.T) {
+	f := synthFrame(14)
+	cfg := DefaultConfig()
+	cfg.Spec.DegradationAudPerKwh = 0.05
+	res := replay(t, cfg, f, forecast.MaxLookbackV2+288, 288)
+	last := res.Ticks[len(res.Ticks)-1]
+	baseline := res.Summary.SelfConsumption
+	want := baseline.BillAud - res.Summary.SupplyAud // energy plus wear, no supply
+	if d := last.CumulativeSelfAud - want; math.Abs(d) > 0.01 {
+		t.Errorf("self cost %v, baseline bill without supply %v", last.CumulativeSelfAud, want)
+	}
+}

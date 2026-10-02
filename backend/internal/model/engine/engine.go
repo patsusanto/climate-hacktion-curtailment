@@ -115,7 +115,8 @@ func Replay(f *data.Frame, fc Forecaster, cfg Config, start, end int) (*Result, 
 	planned := sim.NewMeter(spec)
 	baseline := sim.NewMeter(spec)
 	deg := spec.DegradationAudPerKwh
-	cumulative := 0.0
+	cumulative := 0.0     // self-consumption cost so far minus planner cost so far
+	cumulativeSelf := 0.0 // self-consumption cost so far
 
 	for k := 0; k < n; k++ {
 		i := start + k
@@ -154,9 +155,11 @@ func Replay(f *data.Frame, fc Forecaster, cfg Config, start, end int) (*Result, 
 
 		cash := sim.SpotEnergyAud(step, price)
 		baseCash := sim.SpotEnergyAud(baseStep, price)
-		// bill so far, self-consumption minus planner; wear counts toward both
-		cumulative += (baseCash + deg*(baseStep.BatteryChargeAcKwh+baseStep.BatteryDischargeAcKwh)) -
-			(cash + deg*(step.BatteryChargeAcKwh+step.BatteryDischargeAcKwh))
+		// cost so far for each policy; wear counts toward both
+		baseCost := baseCash + deg*(baseStep.BatteryChargeAcKwh+baseStep.BatteryDischargeAcKwh)
+		plannedCost := cash + deg*(step.BatteryChargeAcKwh+step.BatteryDischargeAcKwh)
+		cumulativeSelf += baseCost
+		cumulative += baseCost - plannedCost
 
 		// the 1-hour-ahead forecast aimed at this step, issued 12 steps ago
 		est, err := leadAt(forecasts[i-first-split.StepsPerHour].curve, forecasts[i-first-split.StepsPerHour].ok, split.StepsPerHour)
@@ -180,6 +183,7 @@ func Replay(f *data.Frame, fc Forecaster, cfg Config, start, end int) (*Result, 
 			GridImportKwh:        round(step.GridImportKwh, 4),
 			GridExportKwh:        round(step.GridExportKwh, 4),
 			EnergyCashAud:        round(cash, 4),
+			CumulativeSelfAud:    round(cumulativeSelf, 4),
 			CumulativeSavingsAud: round(cumulative, 4),
 		})
 

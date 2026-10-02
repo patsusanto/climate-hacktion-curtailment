@@ -57,21 +57,24 @@ type Window struct {
 
 // Tick is one 5-minute step (PlaygroundTick).
 type Tick struct {
-	I                    int     `json:"i"`
-	T                    string  `json:"t"`
-	PriceAudMwh          float64 `json:"price_aud_mwh"`
-	PriceEstP10          float64 `json:"price_est_p10_aud_mwh"`
-	PriceEstP50          float64 `json:"price_est_p50_aud_mwh"`
-	PriceEstP90          float64 `json:"price_est_p90_aud_mwh"`
-	PvKw                 float64 `json:"pv_kw"`
-	PvEstKw              float64 `json:"pv_est_kw"`
-	LoadKw               float64 `json:"load_kw"`
-	LoadEstKw            float64 `json:"load_est_kw"`
-	Action               string  `json:"action"`
-	SocKwh               float64 `json:"soc_kwh"`
-	GridImportKwh        float64 `json:"grid_import_kwh"`
-	GridExportKwh        float64 `json:"grid_export_kwh"`
-	EnergyCashAud        float64 `json:"energy_cash_aud"`
+	I             int     `json:"i"`
+	T             string  `json:"t"`
+	PriceAudMwh   float64 `json:"price_aud_mwh"`
+	PriceEstP10   float64 `json:"price_est_p10_aud_mwh"`
+	PriceEstP50   float64 `json:"price_est_p50_aud_mwh"`
+	PriceEstP90   float64 `json:"price_est_p90_aud_mwh"`
+	PvKw          float64 `json:"pv_kw"`
+	PvEstKw       float64 `json:"pv_est_kw"`
+	LoadKw        float64 `json:"load_kw"`
+	LoadEstKw     float64 `json:"load_est_kw"`
+	Action        string  `json:"action"`
+	SocKwh        float64 `json:"soc_kwh"`
+	GridImportKwh float64 `json:"grid_import_kwh"`
+	GridExportKwh float64 `json:"grid_export_kwh"`
+	EnergyCashAud float64 `json:"energy_cash_aud"`
+	// CumulativeSelfAud is the self-consumption energy cost so far (positive means
+	// that strategy has paid). The planner's cost so far is CumulativeSelfAud - CumulativeSavingsAud.
+	CumulativeSelfAud    float64 `json:"cumulative_self_aud"`
 	CumulativeSavingsAud float64 `json:"cumulative_savings_aud"`
 }
 
