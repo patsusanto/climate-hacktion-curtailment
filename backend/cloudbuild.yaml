@@ -1,0 +1,34 @@
+# Builds the backend image and deploys it to Cloud Run.
+# Run from the repo root by a Cloud Build trigger; steps use dir: backend.
+substitutions:
+  _REGION: europe-west1
+  _SERVICE: backend
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${_SERVICE}:${COMMIT_SHA}
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    dir: backend
+    args: ['build', '-t', '${_IMAGE}', '.']
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ['push', '${_IMAGE}']
+
+  # Existing env vars (e.g. BACKEND_URL) are kept across revisions.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}
+      - --region=${_REGION}
+      - --allow-unauthenticated
+
+options:
+  # Lets _IMAGE reference the other substitutions
+  dynamic_substitutions: true
+  # Required when the trigger uses a user-specified service account
+  logging: CLOUD_LOGGING_ONLY
