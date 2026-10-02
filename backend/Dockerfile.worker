@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # The live model service. Build with: docker build -f Dockerfile.worker -t worker .
-# The window data is not in the image: mount it at /data (a Cloud Storage bucket on Cloud Run).
+# The window data (backend/data/<window>/*.csv) is committed to the repo and baked in at /data.
 ARG GO_VERSION=1.27
 
 # ---- build stage ----
@@ -17,6 +17,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worke
 # ---- runtime stage ----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/worker /worker
+COPY --from=build /src/data /data
 
 ENV PORT=8080
 ENV DATA_DIR=/data

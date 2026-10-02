@@ -1,13 +1,12 @@
 # Builds the model worker and deploys it to Cloud Run as a private service.
 # Run from the repo root by a Cloud Build trigger; steps use dir: backend.
 #
-# The worker needs the window data (backend/data/<window>/*.csv, as written by cmd/genrun).
-# Put it in a Cloud Storage bucket and name the bucket in _DATA_BUCKET. The worker's service
-# account needs roles/storage.objectViewer on it. See README.md, "Deploy the model worker".
+# The window data (backend/data/<window>/*.csv, as written by cmd/genrun) is committed to the
+# repo and baked into the image, so there is nothing else to set up. See README.md,
+# "Deploy the model worker".
 substitutions:
   _REGION: europe-west1
   _SERVICE: worker
-  _DATA_BUCKET: climate-hacktion-data
   _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${_SERVICE}:${COMMIT_SHA}
 
 steps:
@@ -32,16 +31,16 @@ steps:
       - --region=${_REGION}
       # Private: only services granted roles/run.invoker (the public backend) can call it
       - --no-allow-unauthenticated
-      - --execution-environment=gen2
       # A run is CPU-bound, so few at a time per instance; more instances scale it out
       - --cpu=2
-      - --memory=2Gi
+      # Measured: about 50 MB idle and under 100 MB after several runs, so 1 GiB is ample
+      - --memory=1Gi
       - --concurrency=2
       - --max-instances=3
       - --timeout=900
+      # Extra CPU while the instance starts (it parses the window data), to shorten cold starts
+      - --cpu-boost
       - --set-env-vars=DATA_DIR=/data,STREAM_SECONDS=25,MAX_RUNS=2
-      - --add-volume=name=data,type=cloud-storage,bucket=${_DATA_BUCKET},readonly=true
-      - --add-volume-mount=volume=data,mount-path=/data
 
 options:
   # Lets _IMAGE reference the other substitutions
