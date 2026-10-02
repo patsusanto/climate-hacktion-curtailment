@@ -1,0 +1,189 @@
+package main
+
+import (
+	"bytes"
+	"embed"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"math"
+	"strconv"
+)
+
+// Precomputed example runs, baked into the binary and loaded at startup.
+//
+//go:embed runs/*.json
+var runsFS embed.FS
+
+// Types below mirror interfacespec.md. Ticks, summaries and step details are
+// passed through as raw JSON, so only the pieces the API inspects are typed.
+
+type PlaygroundRequest struct {
+	Address      string          `json:"address"`
+	PvKwAc       float64         `json:"pv_kw_ac"`
+	BatteryKwh   float64         `json:"battery_kwh"`
+	BatteryKw    *float64        `json:"battery_kw"`
+	ExportCapKw  *float64        `json:"export_cap_kw"`
+	DailyLoadKwh *float64        `json:"daily_load_kwh"`
+	Window       json.RawMessage `json:"window"`
+}
+
+type Meta struct {
+	Assumptions Assumptions `json:"assumptions"`
+	Spec        Spec        `json:"spec"`
+	Window      Window      `json:"window"`
+}
+
+type Assumptions struct {
+	PriceRegion  string  `json:"price_region"`
+	PriceSource  string  `json:"price_source"`
+	Roof         string  `json:"roof"`
+	Load         string  `json:"load"`
+	AddressLabel string  `json:"address_label"`
+	Lat          float64 `json:"lat"`
+	Lon          float64 `json:"lon"`
+	Note         string  `json:"note"`
+}
+
+type Spec struct {
+	PvKwAc               float64 `json:"pv_kw_ac"`
+	ExportCapKw          float64 `json:"export_cap_kw"`
+	BatteryKwh           float64 `json:"battery_kwh"`
+	BatteryKw            float64 `json:"battery_kw"`
+	UsableKwh            float64 `json:"usable_kwh"`
+	DailyLoadKwh         float64 `json:"daily_load_kwh"`
+	DegradationAudPerKwh float64 `json:"degradation_aud_per_kwh"`
+}
+
+type Window struct {
+	Start       string `json:"start"`
+	End         string `json:"end"`
+	StepMinutes int    `json:"step_minutes"`
+	N           int    `json:"n"`
+}
+
+// Run is one precomputed example, ready to stream.
+type Run struct {
+	ID         string
+	WindowName string // "validation" or "test"
+	Meta       Meta
+	frames     [][]byte       // complete SSE "step" events, indexed by i
+	done       []byte         // complete SSE "done" event
+	steps      map[int][]byte // StepDecision JSON by step index (may be sparse)
+}
+
+// runFile is the on-disk format of runs/<run_id>.json.
+type runFile struct {
+	RunID      string                     `json:"run_id"`
+	WindowName string                     `json:"window_name"`
+	Meta       Meta                       `json:"meta"`
+	Ticks      []json.RawMessage          `json:"ticks"`
+	Summary    json.RawMessage            `json:"summary"`
+	Steps      map[string]json.RawMessage `json:"steps"`
+}
+
+// loadRuns reads every *.json file in dir and validates it.
+func loadRuns(fsys fs.FS, dir string) (map[string]*Run, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return nil, err
+	}
+	runs := map[string]*Run{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := dir + "/" + e.Name()
+		data, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return nil, err
+		}
+		run, err := parseRun(data)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if _, dup := runs[run.ID]; dup {
+			return nil, fmt.Errorf("%s: duplicate run_id %q", name, run.ID)
+		}
+		runs[run.ID] = run
+	}
+	if len(runs) == 0 {
+		return nil, fmt.Errorf("no runs found in %s", dir)
+	}
+	return runs, nil
+}
+
+func parseRun(data []byte) (*Run, error) {
+	var f runFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, err
+	}
+	n := f.Meta.Window.N
+	switch {
+	case f.RunID == "":
+		return nil, fmt.Errorf("missing run_id")
+	case f.WindowName != "validation" && f.WindowName != "test":
+		return nil, fmt.Errorf("window_name must be validation or test, got %q", f.WindowName)
+	case n <= 0 || len(f.Ticks) != n:
+		return nil, fmt.Errorf("meta.window.n is %d but there are %d ticks", n, len(f.Ticks))
+	case len(f.Summary) == 0:
+		return nil, fmt.Errorf("missing summary")
+	}
+
+	run := &Run{
+		ID:         f.RunID,
+		WindowName: f.WindowName,
+		Meta:       f.Meta,
+		frames:     make([][]byte, n),
+		steps:      make(map[int][]byte, len(f.Steps)),
+	}
+
+	for i, raw := range f.Ticks {
+		var idx struct {
+			I int `json:"i"`
+		}
+		if err := json.Unmarshal(raw, &idx); err != nil || idx.I != i {
+			return nil, fmt.Errorf("tick at position %d has i=%d", i, idx.I)
+		}
+		// data must be one JSON object with no line breaks inside it
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, raw); err != nil {
+			return nil, err
+		}
+		run.frames[i] = fmt.Appendf(nil, "id: %d\nevent: step\ndata: %s\n\n", i, buf.Bytes())
+	}
+
+	var summary bytes.Buffer
+	if err := json.Compact(&summary, f.Summary); err != nil {
+		return nil, err
+	}
+	run.done = fmt.Appendf(nil, "id: %d\nevent: done\ndata: %s\n\n", n-1, summary.Bytes())
+
+	for k, raw := range f.Steps {
+		i, err := strconv.Atoi(k)
+		if err != nil || i < 0 || i >= n {
+			return nil, fmt.Errorf("steps key %q is not a valid step index", k)
+		}
+		run.steps[i] = bytes.Clone(raw)
+	}
+	return run, nil
+}
+
+// pickRun returns the run for the window whose solar and battery sizes are
+// closest to the request, or nil if there is no run for that window.
+func pickRun(runs map[string]*Run, window string, pvKw, batteryKwh float64) *Run {
+	var best *Run
+	bestDist := math.Inf(1)
+	for _, r := range runs {
+		if r.WindowName != window {
+			continue
+		}
+		d := math.Abs(r.Meta.Spec.PvKwAc-pvKw)/math.Max(r.Meta.Spec.PvKwAc, 1) +
+			math.Abs(r.Meta.Spec.BatteryKwh-batteryKwh)/math.Max(r.Meta.Spec.BatteryKwh, 1)
+		// map order is random, so break ties by id to stay deterministic
+		if d < bestDist || (d == bestDist && best != nil && r.ID < best.ID) {
+			best, bestDist = r, d
+		}
+	}
+	return best
+}
