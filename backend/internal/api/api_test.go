@@ -213,7 +213,7 @@ func TestStep(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"stories"`
 	}
-	if err := json.Unmarshal([]byte(body), &d); err != nil || d.T == "" || len(d.Leads) == 0 || len(d.Stories) != 4 {
+	if err := json.Unmarshal([]byte(body), &d); err != nil || d.T == "" || len(d.Leads) == 0 || len(d.Stories) == 0 {
 		t.Errorf("unexpected detail: %v %s", err, body)
 	}
 

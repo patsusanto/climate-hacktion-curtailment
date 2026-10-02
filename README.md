@@ -140,51 +140,32 @@ backend/
   internal/
     api/             the HTTP server: routes, validation, SSE streaming
     wire/            the JSON shapes from interfacespec.md (plain data)
-    model/           house, sim, planner, policy, forecast, data, engine, split, golden
-    compat/          tests that the engine's run files are served by the API
+    model/           the model: data download, house, forecasts, planner, replay, run-file writer
+    compat/          tests that the model's run files are served by the API
 ```
 
 One rule keeps the deployed service small: `internal/api`, `internal/wire` and `main.go` must not import anything under `internal/model/`. `internal/api/boundary_test.go` fails the build if they do. `internal/wire` may import only the standard library.
 
 ## Generating runs with the Go model
 
-The model is implemented in Go in `backend/internal/model/`, ported from an original Python model that lives outside this repo. It replays a window of history with trained models and writes the run JSON the service serves, so the deployed service never needs the models. Training happens outside this repo.
+The model is in Go in `backend/internal/model/`, with its trained models embedded (`internal/model/models/`). `cmd/genrun` replays a window of history with it and writes the run JSON the service serves, so the deployed service never needs the model. Training happens outside this repo; `backend/internal/model/README.md` describes the model and how to update it.
 
 | Package | What it does |
 | --- | --- |
-| `internal/model/house`, `internal/model/sim` | House specs, tariffs, battery physics, billing |
-| `internal/model/planner`, `internal/model/policy` | The 8-hour dynamic program, the forecast stories, the rule baselines |
-| `internal/model/forecast`, `internal/model/data` | Features, XGBoost price quantiles, the PV/load net; loading the export |
-| `internal/model/engine`, `cmd/genrun` | The replay and the run-file writer |
-
-**1. Provide an export** in `backend/export/` (git-ignored):
-
-| File | Contents |
-| --- | --- |
-| `manifest.json` | `{"price": {"quantiles": [0.1, 0.5, 0.9], "feature_columns": {"12": [...]}, "models": {"12": ["price/lead12_q10.json", ...]}}, "units": "unit_model.json", "weather": "weather.csv.gz"}`, with an entry for each lead: 12, 24, 36, 72, 96 |
-| `price/lead{L}_q{Q}.json` | One XGBoost booster per lead and quantile, saved with `Booster.save_model("x.json")` and cut to the early-stopping best round (`booster[:best_iteration + 1]`) |
-| `unit_model.json` | The PV/load net: `input_dim`, `output_dim`, `feature_columns`, `layers` (`[{"w": [[...]], "b": [...]}]`, ReLU between layers), `scaler_x` and `scaler_y` (`{"mean", "scale"}`), `residuals` (`{"pv_unit": {"12": {"p10", "p90"}}, "load_unit": {...}}`). Outputs are PV units at each lead, then load units at each lead |
-| `weather.csv.gz` | Hourly day-ahead forecast: `time` plus the seven `fc_*` columns listed in `internal/model/forecast/features.go` |
-| `frame.csv.gz` | `time,price_aud_mwh,pv_unit,load_unit` every 5 minutes with no gaps |
-| `golden.json` (optional) | Reference answers from the original model; see step 2 |
-
-Times are RFC 3339 with a `+10:00` offset. Feature names are those of feature set v2 (`internal/model/forecast/features.go`). A window needs a week and an hour of history before it.
-
-**2. Check the Go port against reference answers (optional).** If the export includes `golden.json` (features, forecast curves, planner decisions and a replay from the original model; the shape is in `internal/model/golden/golden_test.go`):
+| `internal/model/fetch`, `internal/model/data` | Download the public data (AEMO prices and pre-dispatch, Open-Meteo weather) and read it |
+| `internal/model/house` | The simulated house: a Sydney roof and household on observed weather |
+| `internal/model/features`, `internal/model/xgb`, `internal/model/forecast` | The models' inputs, the XGBoost price models (P10/P50/P90), the linear solar/demand model |
+| `internal/model/planner`, `internal/model/battery` | The 8-hour battery plan, re-solved every 5 minutes; battery physics and the bill |
+| `internal/model/simulate`, `internal/model/runfile` | The replay (planner vs self-consumption) and the run-file writer |
 
 ```sh
 cd backend
-go test ./internal/model/golden -v
-```
-
-These tests are skipped when there is no `golden.json`. They require at least 99.5% of replay actions to agree and bills within 0.02 AUD.
-
-**3. Generate a run and serve it:**
-
-```sh
-cd backend
-go run ./cmd/genrun -export export -window validation   # writes runs/10.5kw-10kwh.json
+go run ./cmd/genrun -window validation -pv 6.6 -battery-kwh 13.5 -load 18   # writes runs/6.6kw-13.5kwh.json
 go run .
 ```
 
-`genrun` flags include `-pv`, `-battery-kwh`, `-battery-kw`, `-load`, `-export-cap`, `-window validation|test`, `-id`, `-wear` and `-detail-every`. A full validation window takes seconds.
+The first run for a window downloads its data into `backend/data/<window>/` (git-ignored). AEMO's pre-dispatch archives are about 125 MB a week, so this takes a few minutes; `-no-predispatch` skips them, and the price model is then less accurate. After that, a full validation window replays in about a second.
+
+`genrun` flags: `-window validation|test`, `-pv`, `-battery-kwh`, `-battery-kw`, `-load`, `-export-cap`, `-id`, `-wear` (only for `savings_with_wear_aud`), `-detail-every` (default 12: forecast detail is kept for every 12th step, about 3 KB each), `-data`, `-out` and `-curtail forced_only`.
+
+The runs in `runs/` are the validation window (16 Jul - 18 Aug 2026) for the default house (`10kw-10kwh`: 10.5 kW, 10 kWh) and the page's three scenarios. The models were trained on data before 19 Aug 2026, so these runs replay data the models have seen; the `test` window (19 Aug - 9 Sep 2026) is out of sample.
