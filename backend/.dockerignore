@@ -2,7 +2,8 @@
 Dockerfile
 .dockerignore
 *.md
-# Exports and tooling are not needed to serve the precomputed runs
-export
+# The model, its downloads and tooling are not needed to serve the precomputed runs
+data
+internal/model
 cmd
 **/*_test.go

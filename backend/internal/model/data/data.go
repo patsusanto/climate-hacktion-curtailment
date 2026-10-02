@@ -1,204 +1,244 @@
-// Package data reads the household frames of an export (see the README).
-//
-// The Go port never reads parquet. An export holds plain gzip CSV files and
-// this package loads them.
+// Package data reads the CSV files written by the fetch package.
 package data
 
 import (
-	"compress/gzip"
 	"encoding/csv"
 	"fmt"
-	"io"
+	"math"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
-	"strings"
 	"time"
-
-	"climate-hacktion-curtailment/backend/internal/model/split"
 )
 
-// Frame is the joined history on the 5-minute market clock: PV and load in
-// units (kW per kW of PV, and kW at 15 kWh/day) plus the NSW1 spot price.
-type Frame struct {
-	Times    []time.Time
-	Price    []float64
-	PvUnit   []float64
-	LoadUnit []float64
+// NEM is the market's clock: UTC+10, no daylight saving.
+var NEM = time.FixedZone("NEM", 10*3600)
+
+// Step is one market interval, in seconds.
+const Step = 300
+
+// Hourly is an hourly weather table (unix seconds, one column per variable).
+type Hourly struct {
+	T    []int64
+	Cols map[string][]float64
 }
 
-func (f *Frame) Len() int { return len(f.Times) }
-
-// Validate checks the columns line up and the clock is a regular 5-minute grid.
-func (f *Frame) Validate() error {
-	n := len(f.Times)
-	if len(f.Price) != n || len(f.PvUnit) != n || len(f.LoadUnit) != n {
-		return fmt.Errorf("frame columns differ in length")
+// Interp returns col at t, linear between hours. Outside the table it returns NaN when
+// strict, else the nearest end's value.
+func (h *Hourly) Interp(col string, t int64, strict bool) float64 {
+	v, ok := h.Cols[col]
+	n := len(h.T)
+	if !ok || n == 0 {
+		return math.NaN()
 	}
-	for i := 1; i < n; i++ {
-		if f.Times[i].Sub(f.Times[i-1]) != time.Duration(split.StepMinutes)*time.Minute {
-			return fmt.Errorf("gap in the 5-minute clock at row %d (%s -> %s)", i, f.Times[i-1], f.Times[i])
+	if t <= h.T[0] {
+		if strict && t < h.T[0] {
+			return math.NaN()
 		}
+		return v[0]
 	}
-	return nil
+	if t >= h.T[n-1] {
+		if strict && t > h.T[n-1] {
+			return math.NaN()
+		}
+		return v[n-1]
+	}
+	k := sort.Search(n, func(i int) bool { return h.T[i] >= t })
+	if h.T[k] == t {
+		return v[k]
+	}
+	a, b := h.T[k-1], h.T[k]
+	w := float64(t-a) / float64(b-a)
+	return v[k-1] + w*(v[k]-v[k-1])
 }
 
-// IndexOf returns the row index of ts, or -1.
-func (f *Frame) IndexOf(ts time.Time) int {
-	if len(f.Times) == 0 {
+// Predispatch holds AEMO pre-dispatch rows sorted by publication, then period end.
+type Predispatch struct {
+	Published, End []int64
+	RRP, Demand    []float64
+}
+
+// Data is one download: the price clock and the tables around it.
+type Data struct {
+	T0        int64        // unix seconds of the first price interval (interval end)
+	Price     []float64    // $/MWh per 5-minute interval from T0
+	WeatherFC *Hourly      // day-ahead forecasts, fc_<site>_<variable>
+	Observed  *Hourly      // ghi, temperature, cloud_cover at the roof
+	PD        *Predispatch // nil when not downloaded
+}
+
+// N is the number of 5-minute intervals.
+func (d *Data) N() int { return len(d.Price) }
+
+// Time is interval i's end time.
+func (d *Data) Time(i int) time.Time { return time.Unix(d.T0+int64(i)*Step, 0).In(NEM) }
+
+// Index is the interval ending at t, or -1.
+func (d *Data) Index(t time.Time) int {
+	s := t.Unix() - d.T0
+	if s < 0 || s%Step != 0 || s/Step >= int64(len(d.Price)) {
 		return -1
 	}
-	off := int(ts.Sub(f.Times[0]) / (time.Duration(split.StepMinutes) * time.Minute))
-	if off < 0 || off >= len(f.Times) || !f.Times[off].Equal(ts) {
-		return -1
-	}
-	return off
+	return int(s / Step)
 }
 
-// Weather is the hourly day-ahead forecast, one series per column.
-type Weather struct {
-	Times   []time.Time
-	Columns []string
-	Values  [][]float64 // [column][hour]
-}
-
-// openCSV opens a plain or gzip CSV and returns a reader over its records.
-func openCSV(path string) (*csv.Reader, io.Closer, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	var r io.Reader = file
-	closer := io.Closer(file)
-	if strings.HasSuffix(path, ".gz") {
-		gz, err := gzip.NewReader(file)
-		if err != nil {
-			file.Close()
-			return nil, nil, err
-		}
-		r = gz
-		closer = multiCloser{gz, file}
-	}
-	cr := csv.NewReader(r)
-	cr.ReuseRecord = true
-	return cr, closer, nil
-}
-
-type multiCloser []io.Closer
-
-func (m multiCloser) Close() error {
-	var first error
-	for _, c := range m {
-		if err := c.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
-}
-
-const timeLayout = "2006-01-02T15:04:05-07:00"
-
-func parseTime(s string) (time.Time, error) {
-	t, err := time.Parse(timeLayout, s)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return t.In(split.NEM), nil
-}
-
-func header(cr *csv.Reader, want ...string) (map[string]int, error) {
-	row, err := cr.Read()
+// Load reads a folder written by fetch.
+func Load(dir string) (*Data, error) {
+	prices, err := readCSV(filepath.Join(dir, "prices.csv"))
 	if err != nil {
 		return nil, err
 	}
-	idx := map[string]int{}
-	for i, name := range row {
-		idx[name] = i
+	d := &Data{}
+	if len(prices.rows) == 0 {
+		return nil, fmt.Errorf("data: prices.csv is empty")
 	}
-	for _, name := range want {
-		if _, ok := idx[name]; !ok {
-			return nil, fmt.Errorf("missing column %q", name)
+	times := make([]int64, len(prices.rows))
+	for i, r := range prices.rows {
+		if times[i], err = unix(r[0]); err != nil {
+			return nil, err
 		}
 	}
-	return idx, nil
+	d.T0 = times[0]
+	d.Price = make([]float64, (times[len(times)-1]-d.T0)/Step+1)
+	for i := range d.Price {
+		d.Price[i] = math.NaN()
+	}
+	col := prices.col["price_aud_mwh"]
+	for i, r := range prices.rows {
+		d.Price[(times[i]-d.T0)/Step] = number(r[col])
+	}
+	if d.WeatherFC, err = readHourly(filepath.Join(dir, "weather_forecast.csv")); err != nil {
+		return nil, err
+	}
+	if d.Observed, err = readHourly(filepath.Join(dir, "weather_observed.csv")); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "predispatch.csv")
+	if _, err := os.Stat(path); err == nil {
+		if d.PD, err = readPredispatch(path); err != nil {
+			return nil, err
+		}
+	}
+	return d, nil
 }
 
-// LoadFrame reads a CSV with columns time, price_aud_mwh, pv_unit, load_unit.
-// time is RFC 3339 with a +10:00 offset.
-func LoadFrame(path string) (*Frame, error) {
-	cr, closer, err := openCSV(path)
+type table struct {
+	col  map[string]int
+	rows [][]string
+}
+
+func readCSV(path string) (*table, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	idx, err := header(cr, "time", "price_aud_mwh", "pv_unit", "load_unit")
+	defer f.Close()
+	records, err := csv.NewReader(f).ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	f := &Frame{}
-	for line := 2; ; line++ {
-		rec, err := cr.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, line, err)
-		}
-		ts, err := parseTime(rec[idx["time"]])
-		if err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, line, err)
-		}
-		vals := [3]float64{}
-		for k, name := range [3]string{"price_aud_mwh", "pv_unit", "load_unit"} {
-			vals[k], err = strconv.ParseFloat(rec[idx[name]], 64)
-			if err != nil {
-				return nil, fmt.Errorf("%s line %d %s: %w", path, line, name, err)
-			}
-		}
-		f.Times = append(f.Times, ts)
-		f.Price = append(f.Price, vals[0])
-		f.PvUnit = append(f.PvUnit, vals[1])
-		f.LoadUnit = append(f.LoadUnit, vals[2])
+	if len(records) == 0 {
+		return nil, fmt.Errorf("%s: empty", path)
 	}
-	return f, f.Validate()
+	t := &table{col: map[string]int{}, rows: records[1:]}
+	for i, name := range records[0] {
+		t.col[name] = i
+	}
+	return t, nil
 }
 
-// LoadWeather reads a CSV with a time column plus one column per forecast
-// series. time is RFC 3339 with a +10:00 offset.
-func LoadWeather(path string) (*Weather, error) {
-	cr, closer, err := openCSV(path)
+func unix(s string) (int64, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return 0, err
+	}
+	return t.Unix(), nil
+}
+
+func number(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return v
+}
+
+// readHourly reads an hourly table and fills gaps linearly (the ends with the nearest value).
+func readHourly(path string) (*Hourly, error) {
+	t, err := readCSV(path)
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	head, err := cr.Read()
-	if err != nil {
-		return nil, err
+	h := &Hourly{T: make([]int64, len(t.rows)), Cols: map[string][]float64{}}
+	for i, r := range t.rows {
+		if h.T[i], err = unix(r[0]); err != nil {
+			return nil, err
+		}
 	}
-	head = append([]string(nil), head...)
-	if len(head) < 2 || head[0] != "time" {
-		return nil, fmt.Errorf("%s: first column must be time", path)
+	for name, c := range t.col {
+		if name == "time" {
+			continue
+		}
+		v := make([]float64, len(t.rows))
+		for i, r := range t.rows {
+			v[i] = number(r[c])
+		}
+		fillGaps(v)
+		h.Cols[name] = v
 	}
-	w := &Weather{Columns: head[1:], Values: make([][]float64, len(head)-1)}
-	for line := 2; ; line++ {
-		rec, err := cr.Read()
-		if err == io.EOF {
-			break
+	return h, nil
+}
+
+func fillGaps(v []float64) {
+	last := -1
+	for i, x := range v {
+		if math.IsNaN(x) {
+			continue
 		}
-		if err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, line, err)
-		}
-		ts, err := parseTime(rec[0])
-		if err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, line, err)
-		}
-		w.Times = append(w.Times, ts)
-		for c := range w.Columns {
-			v, err := strconv.ParseFloat(rec[c+1], 64)
-			if err != nil {
-				return nil, fmt.Errorf("%s line %d %s: %w", path, line, w.Columns[c], err)
+		if last == -1 {
+			for j := 0; j < i; j++ {
+				v[j] = x
 			}
-			w.Values[c] = append(w.Values[c], v)
+		} else {
+			for j := last + 1; j < i; j++ {
+				v[j] = v[last] + (x-v[last])*float64(j-last)/float64(i-last)
+			}
+		}
+		last = i
+	}
+	if last >= 0 {
+		for j := last + 1; j < len(v); j++ {
+			v[j] = v[last]
 		}
 	}
-	return w, nil
+}
+
+func readPredispatch(path string) (*Predispatch, error) {
+	t, err := readCSV(path)
+	if err != nil {
+		return nil, err
+	}
+	n := len(t.rows)
+	p := &Predispatch{make([]int64, n), make([]int64, n), make([]float64, n), make([]float64, n)}
+	for i, r := range t.rows {
+		if p.Published[i], err = unix(r[t.col["published"]]); err != nil {
+			return nil, err
+		}
+		if p.End[i], err = unix(r[t.col["period_end"]]); err != nil {
+			return nil, err
+		}
+		p.RRP[i] = number(r[t.col["rrp"]])
+		p.Demand[i] = number(r[t.col["demand_mw"]])
+	}
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return p.Published[order[a]] < p.Published[order[b]] })
+	s := &Predispatch{make([]int64, n), make([]int64, n), make([]float64, n), make([]float64, n)}
+	for i, j := range order {
+		s.Published[i], s.End[i], s.RRP[i], s.Demand[i] = p.Published[j], p.End[j], p.RRP[j], p.Demand[j]
+	}
+	return s, nil
 }
