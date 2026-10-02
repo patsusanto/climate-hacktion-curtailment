@@ -1,0 +1,10 @@
+# Used instead of .dockerignore when building Dockerfile.worker (BuildKit). The worker needs
+# internal/model, internal/worker and cmd/worker; it does not need the rest.
+.git
+Dockerfile*
+*.md
+data
+export
+runs
+cmd/genrun
+**/*_test.go
