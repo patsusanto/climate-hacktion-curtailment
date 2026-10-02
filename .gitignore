@@ -6,3 +6,6 @@
 
 # An export supplied for the Go engine: models, history, weather, golden vectors (see README)
 /backend/export/
+
+# Trained Python model files; they belong with the Python project, not here
+*.joblib
