@@ -96,3 +96,25 @@ gcloud run deploy frontend \
 `gcloud run deploy` prints the frontend URL when it finishes. Cloud Run sets `PORT` for you and both containers read it.
 
 The backend must allow unauthenticated requests because the frontend proxies to its public URL. Making it private would require the proxy to send identity tokens.
+
+## Playground API
+
+The backend serves precomputed example runs from `backend/runs/*.json` (embedded in the binary and loaded into memory at startup). There is no database. `run_id` selects a run, and the address only changes the label in `meta`. A request gets the run for its window (`"validation"` or `"test"`) whose solar and battery sizes are closest. Custom `{start, end}` windows return 400.
+
+| Route | Description |
+| --- | --- |
+| `POST /v1/playground/run` | Body is a `PlaygroundRequest` (see `interfacespec.md`). Returns `{run_id, meta}` as JSON. |
+| `GET /v1/playground/run/{run_id}/events` | Server-Sent Events: `step` events in order of `i`, then one `done` with the summary. Send `Last-Event-ID` to resume. An unknown id sends `event: error`. |
+| `GET /v1/playground/run/{run_id}/steps/{i}` | `StepDecision` (forecast leads and stories) for one step. Returns 404 for steps with no stored detail. |
+
+```sh
+curl -X POST localhost:8080/v1/playground/run \
+  -d '{"address":"1 Example St, Sydney","pv_kw_ac":10.5,"battery_kwh":10,"window":"validation"}'
+curl -N localhost:8080/v1/playground/run/10kw-10kwh/events
+```
+
+A full stream takes about 25 seconds. Set `STREAM_SECONDS` to change that, or add `?speed=max` to skip the pacing. Run the tests with `cd backend && go test ./...`.
+
+### Adding a run
+
+Add `backend/runs/<run_id>.json` with `run_id`, `window_name`, `meta`, `ticks` (one per step, `i` from 0), `summary`, and optionally `steps` (a map from step index to `StepDecision`). The service refuses to start if `ticks` doesn't match `meta.window.n`.
