@@ -101,3 +101,49 @@ func TestDecisions(t *testing.T) {
 		t.Errorf("forced_only clips only what the cap and battery force: %+v", f)
 	}
 }
+
+// At a solar farm's size (here 1000 times a house's) the plan must still be found, and since
+// the problem scales linearly, cost exactly 1000 times as much.
+func TestLargeSitesScale(t *testing.T) {
+	raw, err := os.ReadFile("testdata/lp_cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Cases []struct {
+			SOC     float64   `json:"soc"`
+			Price   []float64 `json:"price"`
+			PV      []float64 `json:"pv_kw"`
+			Load    []float64 `json:"load_kw"`
+			Curtail Curtail   `json:"curtail"`
+			Spec    struct {
+				BatteryKWh  float64 `json:"battery_kwh"`
+				BatteryKW   float64 `json:"battery_kw"`
+				ExportCapKW float64 `json:"export_cap_kw"`
+				Wear        float64 `json:"wear"`
+			} `json:"spec"`
+			LPCost float64 `json:"lp_cost"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	const k = 1000
+	scale := func(v []float64) []float64 {
+		out := make([]float64, len(v))
+		for i, x := range v {
+			out[i] = x * k
+		}
+		return out
+	}
+	for i, c := range file.Cases {
+		spec, _ := battery.NewSpec(6.6*k, c.Spec.BatteryKWh*k, c.Spec.BatteryKW*k, c.Spec.ExportCapKW*k, 15*k, c.Spec.Wear)
+		plan, err := Solve(c.SOC*k, spotOnly(c.Price, scale(c.PV), scale(c.Load)), spec, c.Curtail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(plan.Cost-k*c.LPCost) > 1e-6*math.Max(1, math.Abs(k*c.LPCost)) {
+			t.Errorf("case %d at %dx: cost %.6f, want %.6f", i, k, plan.Cost, k*c.LPCost)
+		}
+	}
+}

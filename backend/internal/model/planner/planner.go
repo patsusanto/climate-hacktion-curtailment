@@ -300,16 +300,28 @@ func best(h, v *pwl, soc, lo, hi float64) (d, cost float64) {
 	}
 	hs, vs := newCursor(h, dLo), newCursor(v, soc+dLo)
 	x := dLo
+	// step moves x to the next breakpoint of either function. At large sizes (a solar farm's MWh)
+	// rounding can leave a cursor just short of x; it is then moved on, so the walk always ends.
+	step := func() {
+		nx := math.Min(dHi, math.Min(hs.next(), vs.next()-soc))
+		if nx > x {
+			x = nx
+			hs.seek(x)
+			vs.seek(soc + x)
+			return
+		}
+		if hs.next() <= x {
+			hs.advance()
+		} else {
+			vs.advance()
+		}
+	}
 	for x < dHi-eps && hs.slope()+vs.slope() < -eps {
-		x = math.Min(dHi, math.Min(hs.next(), vs.next()-soc))
-		hs.seek(x)
-		vs.seek(soc + x)
+		step()
 	}
 	left := x
 	for x < dHi-eps && hs.slope()+vs.slope() <= eps { // a flat bottom: find where it ends
-		x = math.Min(dHi, math.Min(hs.next(), vs.next()-soc))
-		hs.seek(x)
-		vs.seek(soc + x)
+		step()
 	}
 	d = math.Min(math.Max(0, left), math.Max(left, x)) // 0 if the flat bottom [left, x] holds it
 	return d, h.eval(d) + v.eval(soc+d)
@@ -331,6 +343,14 @@ func newCursor(f *pwl, x float64) *cursor {
 // seek moves to the segment that continues right of x.
 func (c *cursor) seek(x float64) {
 	for c.k < len(c.f.length) && c.at+c.f.length[c.k] <= x+1e-15 {
+		c.at += c.f.length[c.k]
+		c.k++
+	}
+}
+
+// advance moves to the next segment.
+func (c *cursor) advance() {
+	if c.k < len(c.f.length) {
 		c.at += c.f.length[c.k]
 		c.k++
 	}
