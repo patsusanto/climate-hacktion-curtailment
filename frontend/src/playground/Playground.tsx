@@ -504,6 +504,7 @@ export default function Playground() {
             <Comparison
               selfEnergy={latest ? latest.cumulative_self_aud : null}
               savings={latest ? latest.cumulative_savings_aud : null}
+              supply={latest ? latest.cumulative_supply_aud : null}
               summary={summary}
             />
             {summary?.warnings && summary.warnings.length > 0 && (
@@ -645,40 +646,44 @@ const scenarios: Scenario[] = [
 function Comparison({
   selfEnergy,
   savings,
+  supply,
   summary,
 }: {
   selfEnergy: number | null
   savings: number | null
+  supply: number | null
   summary: PlaygroundSummary | null
 }) {
-  const selfPaid = summary ? summary.self_consumption.bill_aud : selfEnergy
+  const supplyAud = summary?.supply_aud ?? supply
+  const selfPaid =
+    summary != null
+      ? summary.self_consumption.bill_aud
+      : selfEnergy != null
+        ? selfEnergy + (supplyAud ?? 0)
+        : null
+  const systemEnergy = selfEnergy != null && savings != null ? selfEnergy - savings : null
   const systemPaid =
     summary != null
       ? summary.planner.bill_aud
-      : selfEnergy != null && savings != null
-        ? selfEnergy - savings
+      : systemEnergy != null
+        ? systemEnergy + (supplyAud ?? 0)
         : null
-  const supply = summary
-    ? ` Includes supply of ${money(summary.supply_aud)}${summary.planner.wear_aud != null ? ' and battery wear' : ''}.`
-    : ''
+  // Both running totals include battery wear as well as energy and supply.
+  const supplyLine = supplyAud != null ? ` Includes supply of ${money(supplyAud)} and battery wear.` : ''
   return (
     <div className="compare">
       <PaidCard
         eyebrow="Self-consumption"
         paid={selfPaid}
         would
-        note={
-          summary
-            ? `Battery on its default setting: stores spare solar, runs the house at night.${supply}`
-            : 'Energy so far, battery on its default setting.'
-        }
+        note={`Battery on its default setting: stores spare solar, runs the house at night.${supplyLine}`}
         bill={summary?.self_consumption}
       />
       <PaidCard
         eyebrow="With this system"
         paid={systemPaid}
         would={false}
-        note={summary ? `Instead.${supply}` : 'Energy so far.'}
+        note={`Instead.${supplyLine}`}
         bill={summary?.planner}
       />
     </div>
@@ -720,7 +725,8 @@ function paidPhrase(amount: number, would: boolean): string {
 }
 
 function paidSoFar(tick: PlaygroundTick): string {
-  const amount = tick.cumulative_self_aud - tick.cumulative_savings_aud
+  const amount =
+    tick.cumulative_self_aud - tick.cumulative_savings_aud + tick.cumulative_supply_aud
   return `With this system you ${paidPhrase(amount, false)} so far`
 }
 

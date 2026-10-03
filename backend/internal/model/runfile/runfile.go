@@ -24,9 +24,9 @@ import (
 // Options are the run's labels and what to keep.
 type Options struct {
 	ID            string
-	WindowName    string  // one of data.Windows
-	DetailEvery   int     // keep the forecast detail for every Nth step (the file grows ~3 KB per kept step)
-	TrainedBefore string  // shown in the note, e.g. "19 Aug 2026"
+	WindowName    string // one of data.Windows
+	DetailEvery   int    // keep the forecast detail for every Nth step (the file grows ~3 KB per kept step)
+	TrainedBefore string // shown in the note, e.g. "19 Aug 2026"
 }
 
 // Meta is the run's metadata, which a live run sends before the first step. start and end are
@@ -64,13 +64,20 @@ func Meta(spec battery.Spec, sim simulate.Options, start, end time.Time, n int, 
 
 // Ticker turns settled steps into ticks, in order, keeping the running cost of each strategy:
 // energy plus battery wear, so the two compare like for like.
-type Ticker struct{ cumSelf, cumPlanner float64 }
+type Ticker struct {
+	cumSelf, cumPlanner, supply float64
+	day                         string // the current day, counted for the supply charge as the bill counts it
+}
 
 // Tick is step i's tick.
 func (t *Ticker) Tick(i int, s simulate.Step) wire.Tick {
 	cash := s.Planner.Cash(s.Prices)
 	t.cumPlanner += cash + s.PlannerWearAUD
 	t.cumSelf += s.Self.Cash(s.Prices) + s.SelfWearAUD
+	if d := s.Time.Format("2006-01-02"); d != t.day {
+		t.day = d
+		t.supply += s.SupplyAUDPerDay
+	}
 	return wire.Tick{
 		I:                    i,
 		T:                    stamp(s.Time),
@@ -89,6 +96,7 @@ func (t *Ticker) Tick(i int, s simulate.Step) wire.Tick {
 		EnergyCashAud:        round(cash, 5),
 		CumulativeSelfAud:    round(t.cumSelf, 4),
 		CumulativeSavingsAud: round(t.cumSelf-t.cumPlanner, 4),
+		CumulativeSupplyAud:  round(t.supply, 4),
 		ImportAudKwh:         round(s.Prices.Import, 4),
 		ExportAudKwh:         round(s.Prices.Export, 4),
 		Reason:               s.Reason,
@@ -175,7 +183,7 @@ func Payback(spec battery.Spec, a simulate.Annual, wear float64, trainedBefore s
 		basis += fmt.Sprintf(" It covers %d of 12 months; the rest of the year is assumed to be like them.", int(span.Hours()/24/30.4+0.5))
 	}
 	return wire.Payback{
-		Basis: basis,
+		Basis:                        basis,
 		AnnualBillNoSystemAud:        round(a.NoSystemAUD, 2),
 		AnnualBillSelfConsumptionAud: round(a.SelfAUD+wear*a.SelfThroughputKWh, 2),
 		AnnualBillPlannerAud:         round(a.PlannerAUD+wear*a.PlannerThroughputKWh, 2),

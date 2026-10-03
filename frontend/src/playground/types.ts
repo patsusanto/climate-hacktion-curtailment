@@ -76,6 +76,8 @@ export interface PlaygroundTick {
   /** Self-consumption energy cost so far. Positive means that strategy has paid out. */
   cumulative_self_aud: number
   cumulative_savings_aud: number
+  /** Daily supply accrued with the steps so far. The same amount is on both bills. */
+  cumulative_supply_aud: number
   /** What one kWh cost to import and earned exported this step, $/kWh with the tariff applied. */
   import_aud_kwh?: number
   export_aud_kwh?: number

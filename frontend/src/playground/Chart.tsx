@@ -70,7 +70,8 @@ export default function Chart({
   const saveDomain = useMemo(() => {
     if (ticks.length === 0) return [-1, 1] as [number, number]
     const values: number[] = []
-    for (const tick of ticks) values.push(-tick.cumulative_self_aud, tick.cumulative_savings_aud)
+    for (const tick of ticks)
+      values.push(-(tick.cumulative_self_aud + tick.cumulative_supply_aud), tick.cumulative_savings_aud)
     return extent(values, true)
   }, [ticks])
 
@@ -84,7 +85,10 @@ export default function Chart({
   }))
   const actual = priceLine.map((tick) => ({ x: xMid(tick.i), y: yPrice(tick.price_aud_mwh) }))
   const mid = priceLine.map((tick) => ({ x: xMid(tick.i), y: yPrice(tick.price_est_p50_aud_mwh) }))
-  const lost = saveLine.map((tick) => ({ x: xMid(tick.i), y: ySave(-tick.cumulative_self_aud) }))
+  const lost = saveLine.map((tick) => ({
+    x: xMid(tick.i),
+    y: ySave(-(tick.cumulative_self_aud + tick.cumulative_supply_aud)),
+  }))
   const saved = saveLine.map((tick) => ({ x: xMid(tick.i), y: ySave(tick.cumulative_savings_aud) }))
 
   const focus = active != null && ticks[active]?.i === active ? ticks[active] : null
@@ -259,7 +263,7 @@ export default function Chart({
                 <circle cx={xMid(focus.i)} cy={yPrice(focus.price_aud_mwh)} r={3.5} fill="var(--ink)" />
                 <circle
                   cx={xMid(focus.i)}
-                  cy={ySave(-focus.cumulative_self_aud)}
+                  cy={ySave(-(focus.cumulative_self_aud + focus.cumulative_supply_aud))}
                   r={3.5}
                   fill="var(--loss)"
                 />

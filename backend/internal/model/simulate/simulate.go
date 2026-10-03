@@ -65,8 +65,10 @@ type Step struct {
 	Self      battery.Step // self-consumption baseline
 	// Battery wear this step at the options' rate ($), each way of running the battery.
 	PlannerWearAUD, SelfWearAUD float64
-	Reason    string       // why the planner did what it did, in plain words
-	Fallback  bool         // the plan's expected gain was too small, so it ran self-consumption
+	// SupplyAUDPerDay is the tariff's daily supply charge, the same for every step.
+	SupplyAUDPerDay float64
+	Reason          string // why the planner did what it did, in plain words
+	Fallback        bool   // the plan's expected gain was too small, so it ran self-consumption
 	// The 1-hour-ahead forecasts made an hour before this interval.
 	EstPrice  [3]float64 // P10/P50/P90 $/MWh
 	EstPVkW   float64
@@ -147,6 +149,7 @@ func Run(m *forecast.Models, in *forecast.Inputs, spec battery.Spec, start, end 
 		if opt.Load != nil {
 			s.EstLoadkW = r.load(k - weekSteps)
 		}
+		s.SupplyAUDPerDay = opt.Tariff.SupplyAUDPerDay
 		s.PlannerWearAUD = opt.WearAUDPerKWh * (step.ChargeAC + step.DischargeAC)
 		s.SelfWearAUD = opt.WearAUDPerKWh * (self.ChargeAC + self.DischargeAC)
 		s.Reason = reason(s, plan, h, t, spec)
