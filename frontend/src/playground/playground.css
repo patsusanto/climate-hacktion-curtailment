@@ -698,3 +698,38 @@
     grid-template-columns: 1fr;
   }
 }
+
+.season-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+
+.playground label.season-option {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0.5rem 0.4rem;
+  border: 1px solid rgb(27 47 74 / 30%);
+  font-size: 14px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.playground label.season-option.on {
+  background: var(--ink);
+  color: var(--card);
+  border-color: var(--ink);
+}
+
+.season-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.season-option:focus-within {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}

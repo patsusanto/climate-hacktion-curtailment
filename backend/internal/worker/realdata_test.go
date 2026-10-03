@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"testing"
 
+	"climate-hacktion-curtailment/backend/internal/model/data"
 	"climate-hacktion-curtailment/backend/internal/model/runfile"
 	"climate-hacktion-curtailment/backend/internal/wire"
 )
@@ -27,8 +28,8 @@ func TestRealDataReproducesTheCommittedRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(s.Windows()); got != 2 {
-		t.Errorf("%d windows loaded, want validation and test", got)
+	if got := len(s.Windows()); got != len(data.Windows) {
+		t.Errorf("%d windows loaded, want all %d in data.Windows", got, len(data.Windows))
 	}
 
 	files, err := filepath.Glob(filepath.Join("..", "..", "runs", "*.json"))

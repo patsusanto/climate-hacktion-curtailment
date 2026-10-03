@@ -40,7 +40,7 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 	var (
 		dataDir     = fs.String("data", "data", "where to download the public data (one folder per window)")
 		outDir      = fs.String("out", "runs", "directory to write <run_id>.json into")
-		window      = fs.String("window", "validation", `"validation" or "test"`)
+		window      = fs.String("window", "validation", `"summer", "validation" or "test"`)
 		runID       = fs.String("id", "", `run id (default "<pv>kw-<battery>kwh")`)
 		pv          = fs.Float64("pv", 10.5, "solar size, kW AC")
 		batteryKwh  = fs.Float64("battery-kwh", 10, "battery capacity, kWh")
@@ -57,7 +57,7 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 	}
 	bounds, ok := Windows[*window]
 	if !ok {
-		return fmt.Errorf(`window must be "validation" or "test"`)
+		return fmt.Errorf(`window must be "summer", "validation" or "test"`)
 	}
 	start, end := bounds[0], bounds[1]
 	spec, err := battery.NewSpec(*pv, *batteryKwh, *batteryKw, *exportCap, *load, 0)

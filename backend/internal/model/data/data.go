@@ -22,6 +22,8 @@ var NEM = time.FixedZone("NEM", 10*3600)
 // Windows are the named replay windows: the first and last interval of each. The models were
 // trained on data before the test window.
 var Windows = map[string][2]time.Time{
+	// Summer: December 2025 to February 2026. The models were trained on it.
+	"summer":     {time.Date(2025, 12, 1, 0, 0, 0, 0, NEM), time.Date(2026, 2, 28, 23, 55, 0, 0, NEM)},
 	"validation": {time.Date(2026, 7, 16, 0, 0, 0, 0, NEM), time.Date(2026, 8, 18, 23, 55, 0, 0, NEM)},
 	"test":       {time.Date(2026, 8, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 9, 23, 55, 0, 0, NEM)},
 }
