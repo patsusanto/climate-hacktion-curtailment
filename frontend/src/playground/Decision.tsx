@@ -1,5 +1,5 @@
 import { actionFill, actionLabel } from './actions'
-import { kwh, kw, leadLabel, money, priceMwh, stepTime } from './format'
+import { centsKwh, kwh, kw, leadLabel, money, priceMwh, stepTime } from './format'
 import type { PlaygroundTick, StepDecision } from './types'
 
 const storyLabel = {
@@ -40,8 +40,15 @@ export default function Decision({ tick, decision, loading, error }: Props) {
         <span>Roof {kw(tick.pv_kw)}</span>
         <span>Load {kw(tick.load_kw)}</span>
         <span>SoC {kwh(tick.soc_kwh)}</span>
+        {tick.import_aud_kwh != null && <span>Buy {centsKwh(tick.import_aud_kwh)}</span>}
+        {tick.export_aud_kwh != null && <span>Sell {centsKwh(tick.export_aud_kwh)}</span>}
         <span>This step {money(tick.energy_cash_aud)}</span>
       </div>
+      {tick.reason && (
+        <p className="reason">
+          <span className="eyebrow">Why</span> {tick.reason}
+        </p>
+      )}
 
       {fresh && fresh.leads.length > 0 && (
         <table className="leads">

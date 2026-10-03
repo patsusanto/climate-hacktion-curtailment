@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"testing"
 
+	"climate-hacktion-curtailment/backend/internal/model/data"
 	"climate-hacktion-curtailment/backend/internal/model/runfile"
 	"climate-hacktion-curtailment/backend/internal/wire"
 )
@@ -27,8 +28,8 @@ func TestRealDataReproducesTheCommittedRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(s.Windows()); got != 2 {
-		t.Errorf("%d windows loaded, want validation and test", got)
+	if got := len(s.Windows()); got != len(data.Windows) {
+		t.Errorf("%d windows loaded, want all %d in data.Windows", got, len(data.Windows))
 	}
 
 	files, err := filepath.Glob(filepath.Join("..", "..", "runs", "*.json"))
@@ -66,7 +67,7 @@ func TestRealDataReproducesTheCommittedRuns(t *testing.T) {
 			if n != len(want.Ticks) {
 				t.Fatalf("%d steps, the committed run has %d", n, len(want.Ticks))
 			}
-			if got := runfile.Meta(res.Spec, res.Steps[0].Time, res.Steps[n-1].Time, n, opts); !reflect.DeepEqual(got, want.Meta) {
+			if got := runfile.Meta(res.Spec, res.Options, res.Steps[0].Time, res.Steps[n-1].Time, n, opts); !reflect.DeepEqual(got, want.Meta) {
 				t.Errorf("metadata differs:\n got  %+v\n want %+v", got, want.Meta)
 			}
 			var ticker runfile.Ticker
@@ -82,7 +83,7 @@ func TestRealDataReproducesTheCommittedRuns(t *testing.T) {
 			if bad > 0 {
 				t.Errorf("%d of %d ticks differ", bad, n)
 			}
-			if got := runfile.Summary(res, opts); got != want.Summary {
+			if got := runfile.Summary(res, opts); !reflect.DeepEqual(got, want.Summary) {
 				t.Errorf("summary differs:\n got  %+v\n want %+v", got, want.Summary)
 			}
 			for key, detail := range want.Steps {

@@ -36,6 +36,8 @@ type Assumptions struct {
 	Lat          float64 `json:"lat"`
 	Lon          float64 `json:"lon"`
 	Note         string  `json:"note"`
+	// Tariff says how the bills are priced, in one sentence.
+	Tariff string `json:"tariff,omitempty"`
 }
 
 type Spec struct {
@@ -76,6 +78,11 @@ type Tick struct {
 	// that strategy has paid). The planner's cost so far is CumulativeSelfAud - CumulativeSavingsAud.
 	CumulativeSelfAud    float64 `json:"cumulative_self_aud"`
 	CumulativeSavingsAud float64 `json:"cumulative_savings_aud"`
+	// What one kWh cost to import and earned exported this step ($/kWh, the tariff applied).
+	ImportAudKwh float64 `json:"import_aud_kwh"`
+	ExportAudKwh float64 `json:"export_aud_kwh"`
+	// Reason says in plain words why the battery did what it did.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Bill is one policy's totals.
@@ -86,6 +93,9 @@ type Bill struct {
 	ThroughputAcKwh float64 `json:"throughput_ac_kwh"`
 	GridImportKwh   float64 `json:"grid_import_kwh"`
 	GridExportKwh   float64 `json:"grid_export_kwh"`
+	// WearAud is battery wear at the run's rate per kWh moved. BillAud includes it, so the two
+	// ways of running the battery compare like for like.
+	WearAud float64 `json:"wear_aud"`
 }
 
 // Summary is the last event of the stream (PlaygroundSummary).
@@ -95,6 +105,36 @@ type Summary struct {
 	SavingsAud         float64 `json:"savings_aud"`
 	SavingsWithWearAud float64 `json:"savings_with_wear_aud"`
 	SupplyAud          float64 `json:"supply_aud"`
+	// Warnings are things the user should know about this result, such as the planner doing
+	// worse than self-consumption for this house.
+	Warnings []string `json:"warnings,omitempty"`
+	// Payback is what the system costs and how fast it pays for itself, from a year of replay.
+	Payback *Payback `json:"payback,omitempty"`
+}
+
+// Payback compares a year of bills and the system's cost. All amounts are AUD, incl. GST.
+type Payback struct {
+	// Basis says what year was replayed and how.
+	Basis string `json:"basis"`
+	// Bills for a year: the house with no solar and no battery, the same house with this system
+	// running self-consumption, and with it run by the planner.
+	AnnualBillNoSystemAud        float64 `json:"annual_bill_no_system_aud"`
+	AnnualBillSelfConsumptionAud float64 `json:"annual_bill_self_consumption_aud"`
+	AnnualBillPlannerAud         float64 `json:"annual_bill_planner_aud"`
+	// Battery wear for a year at WearAudPerKwh, each way of running it.
+	AnnualWearSelfConsumptionAud float64 `json:"annual_wear_self_consumption_aud"`
+	AnnualWearPlannerAud         float64 `json:"annual_wear_planner_aud"`
+	WearAudPerKwh                float64 `json:"wear_aud_per_kwh"`
+	// Installed cost defaults, before and after rebates; the page lets the user change them.
+	SolarAudPerKw    float64 `json:"solar_aud_per_kw"`
+	BatteryAudPerKwh float64 `json:"battery_aud_per_kwh"`
+	BatteryRebateAud float64 `json:"battery_rebate_aud"`
+	SystemCostAud    float64 `json:"system_cost_aud"`
+	CostSources      string  `json:"cost_sources"`
+	// Years for the bill savings (against no solar and no battery) to repay the system cost.
+	// Zero when the system never pays back.
+	PaybackYearsSelfConsumption float64 `json:"payback_years_self_consumption"`
+	PaybackYearsPlanner         float64 `json:"payback_years_planner"`
 }
 
 // Lead is one lead of the forecast issued at a step.

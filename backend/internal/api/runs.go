@@ -14,7 +14,7 @@ import (
 // Run is one precomputed example, ready to stream.
 type Run struct {
 	ID         string
-	WindowName string // "validation" or "test"
+	WindowName string // one of wire.Windows
 	Meta       wire.Meta
 	frames     [][]byte       // complete SSE "step" events (id, event, data), indexed by i
 	done       []byte         // complete SSE "done" event
@@ -73,8 +73,8 @@ func parseRun(data []byte) (*Run, error) {
 	switch {
 	case f.RunID == "":
 		return nil, fmt.Errorf("missing run_id")
-	case f.WindowName != "validation" && f.WindowName != "test":
-		return nil, fmt.Errorf("window_name must be validation or test, got %q", f.WindowName)
+	case !wire.KnownWindow(f.WindowName):
+		return nil, fmt.Errorf("window_name must be one of %v, got %q", wire.Windows, f.WindowName)
 	case n <= 0 || len(f.Ticks) != n:
 		return nil, fmt.Errorf("meta.window.n is %d but there are %d ticks", n, len(f.Ticks))
 	case len(f.Summary) == 0:

@@ -20,7 +20,8 @@ export async function streamPlayground(
 ): Promise<'done' | 'stopped'> {
   let res: Response
   try {
-    res = await fetch('/api/v1/playground/run', {
+    // The whole run as fast as it is ready; the page paces the playback itself.
+    res = await fetch('/api/v1/playground/run?speed=max', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

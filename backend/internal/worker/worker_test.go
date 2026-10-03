@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"climate-hacktion-curtailment/backend/internal/model/data"
-	"climate-hacktion-curtailment/backend/internal/model/planner"
 	"climate-hacktion-curtailment/backend/internal/model/runfile"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/model/synthetic"
@@ -152,7 +151,7 @@ func TestRunStreamsTheRunFile(t *testing.T) {
 	// the same house replayed directly and packaged as a run file must match event for event
 	sp, _ := spec(wire.Params{PvKwAc: 6.6, BatteryKwh: 13.5, BatteryKw: 5, ExportCapKw: 5, DailyLoadKwh: 15})
 	win := s.windows["validation"]
-	res, err := simulate.Run(s.models, win.in, sp, win.start, win.end, planner.Economic, nil)
+	res, err := simulate.Run(s.models, win.in, sp, win.start, win.end, simulate.DefaultOptions(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

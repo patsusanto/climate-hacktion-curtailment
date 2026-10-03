@@ -28,6 +28,11 @@ steps:
       - --allow-unauthenticated
       # Long enough for the playground event stream
       - --timeout=900
+      # The precomputed runs take about 310 MB in memory; the default 512 MiB leaves little room
+      - --memory=1Gi
+      # A cap on instances, so a flood of requests cannot scale up the bill; one instance serves
+      # many pages at once (streams are mostly waiting)
+      - --max-instances=3
 
 options:
   # Lets _IMAGE reference the other substitutions
