@@ -10,7 +10,6 @@ import (
 	"climate-hacktion-curtailment/backend/internal/model/battery"
 	"climate-hacktion-curtailment/backend/internal/model/data"
 	"climate-hacktion-curtailment/backend/internal/model/forecast"
-	"climate-hacktion-curtailment/backend/internal/model/planner"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/model/synthetic"
 	"climate-hacktion-curtailment/backend/internal/wire"
@@ -41,14 +40,14 @@ func replay(t *testing.T) *simulate.Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := simulate.Run(m, in, spec, start, end, planner.Economic, nil)
+	res, err := simulate.Run(m, in, spec, start, end, simulate.DefaultOptions(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return res
 }
 
-var opts = Options{ID: "t", WindowName: "test", DetailEvery: 12, WearAUDPerKWh: 0.05, TrainedBefore: "19 Aug 2026"}
+var opts = Options{ID: "t", WindowName: "test", DetailEvery: 12, TrainedBefore: "19 Aug 2026"}
 
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
@@ -67,7 +66,7 @@ func TestBuildIsMadeOfThePieces(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := len(res.Steps)
-	if got, want := mustJSON(t, file.Meta), mustJSON(t, Meta(res.Spec, res.Steps[0].Time, res.Steps[n-1].Time, n, opts)); got != want {
+	if got, want := mustJSON(t, file.Meta), mustJSON(t, Meta(res.Spec, res.Options, res.Steps[0].Time, res.Steps[n-1].Time, n, opts)); got != want {
 		t.Errorf("meta differs:\n%s\n%s", got, want)
 	}
 	var ticker Ticker
@@ -97,8 +96,10 @@ func TestRunningCostsAgreeWithTheSummary(t *testing.T) {
 	res := replay(t)
 	file, _ := Build(res, opts)
 	last := file.Ticks[len(file.Ticks)-1]
-	if d := last.CumulativeSelfAud - res.Self.EnergyCashAUD; math.Abs(d) > 0.01 {
-		t.Errorf("self cost so far %v vs baseline energy cash %v", last.CumulativeSelfAud, res.Self.EnergyCashAUD)
+	// The running costs are energy plus battery wear, as the summary's bills are.
+	selfCost := res.Self.EnergyCashAUD + res.Options.WearAUDPerKWh*res.Self.Throughput()
+	if d := last.CumulativeSelfAud - selfCost; math.Abs(d) > 0.01 {
+		t.Errorf("self cost so far %v vs baseline energy and wear %v", last.CumulativeSelfAud, selfCost)
 	}
 	if d := last.CumulativeSavingsAud - file.Summary.SavingsAud; math.Abs(d) > 0.01 {
 		t.Errorf("savings so far %v vs summary %v", last.CumulativeSavingsAud, file.Summary.SavingsAud)

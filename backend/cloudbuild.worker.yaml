@@ -1,7 +1,8 @@
 # Builds the model worker and deploys it to Cloud Run as a private service.
 # Run from the repo root by a Cloud Build trigger; steps use dir: backend.
 #
-# The window data (backend/data/<window>/*.csv, as written by cmd/genrun) is committed to the
+# The data (backend/data/<window>/*.csv, as written by cmd/genrun, and the payback year in
+# backend/data/year/*.csv.gz) is committed to the
 # repo and baked into the image, so there is nothing else to set up. See README.md,
 # "Deploy the model worker".
 substitutions:

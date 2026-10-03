@@ -19,6 +19,12 @@ export function priceMwh(n: number): string {
   })
 }
 
+/** $/kWh as cents per kWh. */
+export function centsKwh(aud: number): string {
+  const c = aud * 100
+  return `${num(c, Math.abs(c) < 10 ? 1 : 0)}c/kWh`
+}
+
 export function kwh(n: number): string {
   return `${num(n, Math.abs(n) >= 10 ? 1 : 2)} kWh`
 }

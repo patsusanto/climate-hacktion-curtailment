@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"climate-hacktion-curtailment/backend/internal/model/battery"
 	"climate-hacktion-curtailment/backend/internal/model/data"
 	"climate-hacktion-curtailment/backend/internal/model/forecast"
-	"climate-hacktion-curtailment/backend/internal/model/planner"
 	"climate-hacktion-curtailment/backend/internal/model/runfile"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/wire"
@@ -29,8 +27,6 @@ import (
 const (
 	maxBodyBytes = 16 << 10
 	streamTick   = 50 * time.Millisecond
-	// wear is only used to report savings_with_wear_aud; it does not change decisions.
-	wearAudPerKwh = 0.05
 )
 
 // Config is how the worker is set up.
@@ -64,6 +60,7 @@ type Server struct {
 	sem     chan struct{}
 	results *cache
 	log     *log.Logger
+	year    *forecast.Inputs // a year of data for the payback figures; nil without it
 }
 
 // New loads the models and the data of every window that has data.
@@ -118,6 +115,22 @@ func New(cfg Config) (*Server, error) {
 		s.windows[name] = w
 		s.log.Printf("window %q ready: %d steps from %s", name, w.last-w.first+1, dir)
 	}
+	if dir, ok := windowDir(cfg.DataDir, "year"); ok {
+		d, err := data.Load(dir)
+		if err != nil {
+			return nil, fmt.Errorf("year: %w", err)
+		}
+		if s.year, err = models.Prepare(d); err != nil {
+			return nil, fmt.Errorf("year: %w", err)
+		}
+		// Forecast the whole year now, once; every house's payback replay then reuses it.
+		if _, err := models.Run(s.year, s.year.Index(data.Year[0]), s.year.Index(data.Year[1])); err != nil {
+			return nil, fmt.Errorf("year: %w", err)
+		}
+		s.log.Printf("year data ready from %s: runs include payback figures", dir)
+	} else {
+		s.log.Printf("no year data in %s: runs leave out the payback figures", filepath.Join(cfg.DataDir, "year"))
+	}
 	if len(s.windows) == 0 {
 		return nil, fmt.Errorf("no window has data in %s; run cmd/genrun once for a window, or point DATA_DIR at its download", cfg.DataDir)
 	}
@@ -129,7 +142,7 @@ func New(cfg Config) (*Server, error) {
 // writes when it skips AEMO pre-dispatch.
 func windowDir(base, name string) (string, bool) {
 	for _, dir := range []string{filepath.Join(base, name), filepath.Join(base, name+"-nopd")} {
-		if st, err := os.Stat(filepath.Join(dir, "prices.csv")); err == nil && !st.IsDir() {
+		if data.Exists(filepath.Join(dir, "prices.csv")) {
 			return dir, true
 		}
 	}
@@ -180,7 +193,7 @@ func (s *Server) acquire() (release func(), ok bool) {
 }
 
 func (s *Server) options(p wire.Params) runfile.Options {
-	return runfile.Options{ID: p.ID(), WindowName: p.Window, DetailEvery: 1, WearAUDPerKWh: wearAudPerKwh, TrainedBefore: s.models.TrainedBefore()}
+	return runfile.Options{ID: p.ID(), WindowName: p.Window, DetailEvery: 1, TrainedBefore: s.models.TrainedBefore()}
 }
 
 func spec(p wire.Params) (battery.Spec, error) {
@@ -200,9 +213,28 @@ func (s *Server) result(p wire.Params, sp battery.Spec, win *window, stop func()
 	}
 	defer release()
 	t0 := time.Now()
-	res, err := simulate.Run(s.models, win.in, sp, win.start, win.end, planner.Economic, func(simulate.Step) error { return stop() })
+	opt := simulate.DefaultOptions()
+	// The year for the payback runs alongside the window.
+	var annual simulate.Annual
+	annualErr := make(chan error, 1)
+	if s.year != nil {
+		go func() {
+			var err error
+			annual, err = simulate.RunAnnual(s.models, s.year, sp, data.Year[0], data.Year[1], simulate.AnnualWeeks, opt)
+			annualErr <- err
+		}()
+	} else {
+		annualErr <- nil
+	}
+	res, err := simulate.Run(s.models, win.in, sp, win.start, win.end, opt, func(simulate.Step) error { return stop() })
+	if aerr := <-annualErr; err == nil && aerr != nil {
+		err = aerr
+	}
 	if err != nil {
 		return nil, err
+	}
+	if s.year != nil {
+		res.Annual = &annual
 	}
 	s.results.put(id, res)
 	s.log.Printf("ran %s: %d steps in %s", id, len(res.Steps), time.Since(t0).Round(time.Millisecond))
@@ -270,7 +302,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 
 	opts := s.options(p)
 	n := len(res.Steps)
-	meta := runfile.Meta(res.Spec, res.Steps[0].Time, res.Steps[n-1].Time, n, opts)
+	meta := runfile.Meta(res.Spec, res.Options, res.Steps[0].Time, res.Steps[n-1].Time, n, opts)
 	meta.Assumptions.AddressLabel = p.Address
 	if !emit(wire.MetaLine(meta)) {
 		return

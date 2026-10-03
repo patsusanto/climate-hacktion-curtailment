@@ -1,11 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { fetchStep, streamPlayground } from './api'
 import Chart from './Chart'
 import Decision from './Decision'
+import Loading from './Loading'
+import Payback from './Payback'
 import { Mascot } from '../mascot/Mascot'
 import { kwh, money } from './format'
+import { seasonLabel } from './types'
 import type {
+  Season,
   PlaygroundMeta,
   PlaygroundRequest,
   PlaygroundSummary,
@@ -15,6 +19,10 @@ import type {
 import './playground.css'
 
 type Status = 'idle' | 'streaming' | 'done' | 'stopped' | 'error'
+
+/** How long a whole window takes to play at 1×. */
+const PLAY_SECONDS = 25
+const RATES = [1, 4, 16] as const
 
 export default function Playground() {
   const reduce = usePrefersReducedMotion()
@@ -27,6 +35,7 @@ export default function Playground() {
   const [batteryKw, setBatteryKw] = useState('')
   const [exportCap, setExportCap] = useState('')
   const [dailyLoad, setDailyLoad] = useState('')
+  const [season, setSeason] = useState<Season>('summer')
 
   const [status, setStatus] = useState<Status>('idle')
   const [formError, setFormError] = useState<string | null>(null)
@@ -43,11 +52,26 @@ export default function Playground() {
   const [decision, setDecision] = useState<StepDecision | null>(null)
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const [liveText, setLiveText] = useState('')
+  const [paused, setPaused] = useState(false)
+  const [rate, setRate] = useState<number>(1)
+  const [received, setReceived] = useState(0)
+  // The loading screen stays until its stages are all ticked; the playback starts after it.
+  const [introDone, setIntroDone] = useState(false)
 
   const buf = useRef<PlaygroundTick[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const runSeq = useRef(0)
   const cancelPaint = useRef<() => void>(() => {})
+  // Playback: steps arrive as fast as the server has them; the page shows them on its own clock.
+  const play = useRef({
+    played: 0,
+    total: 0,
+    rate: 1,
+    paused: false,
+    painted: -1,
+    summary: null as PlaygroundSummary | null,
+    pendingTotal: 0, // steps in the run, waiting for the loading screen to finish
+  })
 
   useEffect(() => {
     const id = 'playground-fonts'
@@ -113,16 +137,37 @@ export default function Playground() {
     }
   }, [runId, decisionIndex])
 
-  function paint(seq: number) {
-    if (seq !== runSeq.current) return
-    const all = buf.current
+  function paint(seq: number, upTo: number) {
+    if (seq !== runSeq.current || upTo === play.current.painted) return
+    play.current.painted = upTo
+    const all = buf.current.slice(0, upTo)
     const last = all[all.length - 1] ?? null
     setCount(all.length)
     setLatest(last)
-    if (!reduceRef.current) setTicks(all.slice())
+    if (!reduceRef.current) setTicks(all)
     if (last && (all.length === 1 || all.length % 48 === 0)) {
       setLiveText(`Step ${all.length}. ${paidSoFar(last)}.`)
     }
+  }
+
+  const finishIntro = useCallback(() => {
+    play.current.total = play.current.pendingTotal
+    setIntroDone(true)
+  }, [])
+
+  function togglePause() {
+    play.current.paused = !play.current.paused
+    setPaused(play.current.paused)
+  }
+
+  function changeRate(next: number) {
+    play.current.rate = next
+    setRate(next)
+    if (play.current.paused) togglePause()
+  }
+
+  function skipToEnd() {
+    play.current.played = buf.current.length
   }
 
   async function onSubmit(event: FormEvent) {
@@ -136,6 +181,7 @@ export default function Playground() {
         batteryKw,
         exportCap,
         dailyLoad,
+        season,
       })
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Check the form.')
@@ -159,6 +205,7 @@ export default function Playground() {
         batteryKw: '',
         exportCap: '',
         dailyLoad: scenario.dailyLoad,
+        season,
       }),
     )
   }
@@ -171,6 +218,10 @@ export default function Playground() {
     const ac = new AbortController()
     abortRef.current = ac
     buf.current = []
+    play.current = { played: 0, total: 0, rate: play.current.rate, paused: false, painted: -1, summary: null, pendingTotal: 0 }
+    setPaused(false)
+    setIntroDone(false)
+    setReceived(0)
 
     setStatus('streaming')
     setError(null)
@@ -187,23 +238,41 @@ export default function Playground() {
     setDecisionError(null)
     setLiveText('Run started.')
 
-    let paintTimer = 0
-    const schedule = () => {
-      if (paintTimer) return
-      paintTimer = window.setTimeout(() => {
-        paintTimer = 0
-        paint(seq)
-      }, 80)
+    const p = play.current
+    const finish = () => {
+      cancelPaint.current()
+      const next = p.summary
+      if (!next) return
+      paint(seq, buf.current.length)
+      setTicks(buf.current.slice())
+      setSummary(next)
+      setStatus('done')
+      setLiveText(
+        `Finished ${buf.current.length} steps. With self-consumption you would have ${paidPhrase(next.self_consumption.bill_aud, true)}. With this system you ${paidPhrase(next.planner.bill_aud, false)}.`,
+      )
     }
-    cancelPaint.current = () => {
-      if (paintTimer) window.clearTimeout(paintTimer)
-      paintTimer = 0
-    }
+    let last = performance.now()
+    const timer = window.setInterval(() => {
+      if (seq !== runSeq.current) return
+      const now = performance.now()
+      const available = buf.current.length
+      if (reduceRef.current) {
+        p.played = available
+      } else if (!p.paused && p.total > 0) {
+        p.played += (p.total / (PLAY_SECONDS * 1000)) * (now - last) * p.rate
+      }
+      last = now
+      p.played = Math.min(p.played, available)
+      setReceived(available)
+      paint(seq, Math.floor(p.played))
+      if (p.summary && Math.floor(p.played) >= available) finish()
+    }, 60)
+    cancelPaint.current = () => window.clearInterval(timer)
     const flush = () => {
       cancelPaint.current()
-      const all = buf.current
+      const all = buf.current.slice(0, Math.floor(p.played))
       setCount(all.length)
-      setTicks(all.slice())
+      setTicks(all)
       setLatest(all[all.length - 1] ?? null)
     }
 
@@ -213,22 +282,17 @@ export default function Playground() {
         {
           onMeta: (next, id) => {
             if (seq !== runSeq.current) return
+            p.pendingTotal = next.window.n // playback starts when the loading screen hands over
             setMeta(next)
             setRunId(id)
           },
           onTick: (tick) => {
             if (seq !== runSeq.current) return
             buf.current.push(tick)
-            schedule()
           },
           onDone: (next) => {
             if (seq !== runSeq.current) return
-            flush()
-            setSummary(next)
-            setStatus('done')
-            setLiveText(
-              `Finished ${buf.current.length} steps. With self-consumption you would have ${paidPhrase(next.self_consumption.bill_aud, true)}. With this system you ${paidPhrase(next.planner.bill_aud, false)}.`,
-            )
+            p.summary = next // shown when the playback reaches the end
           },
         },
         ac.signal,
@@ -254,6 +318,16 @@ export default function Playground() {
 
   function stop() {
     abortRef.current?.abort()
+    if (status !== 'streaming') return
+    // The download may already be complete; stop the playback where it is.
+    runSeq.current++
+    cancelPaint.current()
+    const all = buf.current.slice(0, Math.floor(play.current.played))
+    setCount(all.length)
+    setTicks(all)
+    setLatest(all[all.length - 1] ?? null)
+    setStatus('stopped')
+    setLiveText('Stopped.')
   }
 
   const alert = formError || error
@@ -341,6 +415,23 @@ export default function Playground() {
                 onChange={(event) => setDailyLoad(event.target.value)}
               />
             </label>
+            <fieldset className="span-3 season">
+              <legend className="eyebrow">Season</legend>
+              <div className="season-options">
+                {(Object.keys(seasonLabel) as Season[]).map((s) => (
+                  <label key={s} className={season === s ? 'season-option on' : 'season-option'}>
+                    <input
+                      type="radio"
+                      name="season"
+                      value={s}
+                      checked={season === s}
+                      onChange={() => setSeason(s)}
+                    />
+                    {seasonLabel[s]}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <div className="span-3 actions">
               <button className="primary" type="submit" disabled={status === 'streaming'}>
                 {status === 'streaming' ? 'Running' : 'Run'}
@@ -385,11 +476,11 @@ export default function Playground() {
           </div>
         </div>
       )}
-      {status === 'streaming' && !meta && !error && (
-        <p className="note wait">Starting this house.</p>
+      {status === 'streaming' && !introDone && !error && (
+        <Loading reduce={reduce} ready={meta != null} onFinished={finishIntro} />
       )}
 
-      {meta && (
+      {meta && (introDone || status !== 'streaming') && (
         <section className="chart-section">
           <div className="card chart-card">
             {reduce && status === 'streaming' && (
@@ -416,6 +507,37 @@ export default function Playground() {
               supply={latest ? latest.cumulative_supply_aud : null}
               summary={summary}
             />
+            {summary?.warnings && summary.warnings.length > 0 && (
+              <div className="warnings" role="note">
+                {summary.warnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
+            )}
+            {status === 'streaming' && !reduce && (
+              <div className="playback" role="group" aria-label="Playback">
+                <button type="button" className="follow" onClick={togglePause}>
+                  {paused ? 'Play' : 'Pause'}
+                </button>
+                {RATES.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className={rate === r ? 'follow on' : 'follow'}
+                    aria-pressed={rate === r}
+                    onClick={() => changeRate(r)}
+                  >
+                    {r}×
+                  </button>
+                ))}
+                <button type="button" className="follow" onClick={skipToEnd} disabled={received === 0}>
+                  Skip to end
+                </button>
+                {received < meta.window.n && (
+                  <span className="note">Computing, {Math.round((received / meta.window.n) * 100)}% ready</span>
+                )}
+              </div>
+            )}
             {ticks.length > 1 && (
               <div className="scrub-row">
                 <label className="scrub">
@@ -452,6 +574,10 @@ export default function Playground() {
               aria-valuemax={meta.window.n}
               aria-valuenow={count}
             >
+              <span
+                className="ready"
+                style={{ width: `${Math.min(100, (Math.max(received, count) / meta.window.n) * 100)}%` }}
+              />
               <span style={{ width: `${Math.min(100, (count / meta.window.n) * 100)}%` }} />
             </div>
             {focus && (
@@ -463,7 +589,9 @@ export default function Playground() {
               />
             )}
           </div>
+          {summary?.payback && <Payback payback={summary.payback} spec={meta.spec} />}
           <p className="note assumptions">{meta.assumptions.note}</p>
+          {meta.assumptions.tariff && <p className="note assumptions">{meta.assumptions.tariff}</p>}
           {status === 'stopped' && (
             <p className="note">Stopped. These are the steps that had arrived.</p>
           )}
@@ -540,14 +668,15 @@ function Comparison({
       : systemEnergy != null
         ? systemEnergy + (supplyAud ?? 0)
         : null
-  const supplyLine = supplyAud != null ? ` Includes supply of ${money(supplyAud)}.` : ''
+  // Both running totals include battery wear as well as energy and supply.
+  const supplyLine = supplyAud != null ? ` Includes supply of ${money(supplyAud)} and battery wear.` : ''
   return (
     <div className="compare">
       <PaidCard
         eyebrow="Self-consumption"
         paid={selfPaid}
         would
-        note={`With no battery.${supplyLine}`}
+        note={`Battery on its default setting: stores spare solar, runs the house at night.${supplyLine}`}
         bill={summary?.self_consumption}
       />
       <PaidCard
@@ -624,6 +753,12 @@ function BillFacts({
         <dt>Battery throughput</dt>
         <dd>{kwh(bill.throughput_ac_kwh)}</dd>
       </div>
+      {bill.wear_aud != null && (
+        <div>
+          <dt>Battery wear</dt>
+          <dd>{money(bill.wear_aud)}</dd>
+        </div>
+      )}
     </dl>
   )
 }
@@ -651,6 +786,7 @@ function toRequest(input: {
   batteryKw: string
   exportCap: string
   dailyLoad: string
+  season: Season
 }): PlaygroundRequest {
   const address = input.address.trim()
   if (!address) throw new Error('Add an address.')
@@ -660,7 +796,7 @@ function toRequest(input: {
     address,
     pv_kw_ac: pvKw,
     battery_kwh: batteryKwh,
-    window: 'validation',
+    window: input.season,
   }
   const power = optionalNumber('Battery kW', input.batteryKw, false)
   const cap = optionalNumber('Export cap', input.exportCap, true)

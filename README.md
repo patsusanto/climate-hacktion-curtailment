@@ -220,8 +220,8 @@ The model is in Go in `backend/internal/model/`, with its trained models embedde
 | `internal/model/fetch`, `internal/model/data` | Download the public data (AEMO prices and pre-dispatch, Open-Meteo weather) and read it |
 | `internal/model/house` | The simulated house: a Sydney roof and household on observed weather |
 | `internal/model/features`, `internal/model/xgb`, `internal/model/forecast` | The models' inputs, the XGBoost price models (P10/P50/P90), the linear solar/demand model |
-| `internal/model/planner`, `internal/model/battery` | The 8-hour battery plan, re-solved every 5 minutes; battery physics and the bill |
-| `internal/model/simulate`, `internal/model/runfile` | The replay (planner vs self-consumption) and the run-file writer |
+| `internal/model/planner`, `internal/model/battery` | The 24-hour battery plan, re-solved every 5 minutes; the tariff, battery physics and the bill |
+| `internal/model/simulate`, `internal/model/payback`, `internal/model/runfile` | The replay (planner vs self-consumption) with a reason for each step, the year and payback, and the run-file writer |
 
 ```sh
 cd backend
@@ -229,8 +229,12 @@ go run ./cmd/genrun -window validation -pv 6.6 -battery-kwh 13.5 -load 18   # wr
 go run .
 ```
 
-The data for the two windows is committed in `backend/data/<window>/`, and the live worker reads it. `genrun` downloads a window's data into that folder if it is missing, and replacing it means a commit (about 26 MB of CSV). Do not re-run it for a window that is already there unless you mean to change the data. AEMO's pre-dispatch archives are about 125 MB a week, so this takes a few minutes; `-no-predispatch` skips them, and the price model is then less accurate. After that, a full validation window replays in about a second.
+The data for the two windows is committed in `backend/data/<window>/`, and the live worker reads it. `genrun` downloads a window's data into that folder if it is missing, and replacing it means a commit (about 26 MB of CSV). Do not re-run it for a window that is already there unless you mean to change the data. AEMO's pre-dispatch archives are about 125 MB a week, so this takes a few minutes; `-no-predispatch` skips them, and the price model is then less accurate. After that, a full validation window replays in about two seconds.
 
-`genrun` flags: `-window validation|test`, `-pv`, `-battery-kwh`, `-battery-kw`, `-load`, `-export-cap`, `-id`, `-wear` (only for `savings_with_wear_aud`), `-detail-every` (default 12: forecast detail is kept for every 12th step, about 3 KB each), `-data`, `-out` and `-curtail forced_only`.
+The payback figures come from a year of data in `backend/data/year/` (19 Sep 2025 - 18 Sep 2026, gzipped CSVs, 3.8 MB), which `genrun` and the worker read when it is there. Bills use Ausgrid's time-of-use network tariff on top of the spot price, and include battery wear; `backend/internal/model/README.md` has the details and how the planner compares with self-consumption.
 
-The runs in `runs/` are the validation window (16 Jul - 18 Aug 2026) for the default house (`10kw-10kwh`: 10.5 kW, 10 kWh) and the page's three scenarios. The models were trained on data before 19 Aug 2026, so these runs replay data the models have seen; the `test` window (19 Aug - 9 Sep 2026) is out of sample.
+`genrun` flags: `-window validation|test`, `-pv`, `-battery-kwh`, `-battery-kw`, `-load`, `-export-cap`, `-id`, `-wear` (battery wear per kWh moved, default 5c: the planner weighs cycling against it and the bills include it), `-detail-every` (default 12: forecast detail is kept for every 12th step, about 3 KB each), `-data`, `-out` and `-curtail forced_only`.
+
+The page offers two seasons: `summer` (1 Dec 2025 - 28 Feb 2026, data in `backend/data/summer/`, run live by the worker) and winter, which is the `validation` window. The models were trained on both, and the page says so; only `test` is out of sample.
+
+The runs in `runs/` are the validation window (16 Jul - 18 Aug 2026) for the default house (`10kw-10kwh`: 10.5 kW, 10 kWh) and the page's three scenarios. The model was trained on data before 1 Dec 2025, so these runs, the `summer` and `test` windows and the payback year are all data it never saw.

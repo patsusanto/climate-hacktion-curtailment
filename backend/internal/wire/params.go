@@ -35,7 +35,7 @@ type Params struct {
 	BatteryKw    float64
 	ExportCapKw  float64
 	DailyLoadKwh float64
-	Window       string // "validation" or "test"
+	Window       string // one of Windows
 }
 
 // Resolve checks the request and fills in the defaults. The error text is meant for the user.
@@ -100,24 +100,42 @@ func (p Params) checkHouse() error {
 	return nil
 }
 
-// windowName accepts "validation" or "test". Custom {start, end} windows are not supported
-// because the data for a window has to be prepared in advance.
+// Windows are the replay windows a request can name. Their dates are in the model's data
+// package: summer is 1 Dec 2025 - 28 Feb 2026, validation 16 Jul - 18 Aug 2026 (winter), and
+// test 19 Aug - 9 Sep 2026. The models were trained on data before 1 Dec 2025, so all three are
+// periods they never saw.
+var Windows = []string{"summer", "validation", "test"}
+
+// KnownWindow says whether name is one of Windows.
+func KnownWindow(name string) bool {
+	for _, w := range Windows {
+		if w == name {
+			return true
+		}
+	}
+	return false
+}
+
+const windowChoices = `"summer", "validation" or "test"`
+
+// windowName accepts one of Windows. Custom {start, end} windows are not supported because the
+// data for a window has to be prepared in advance.
 func windowName(raw json.RawMessage) (string, error) {
 	var name string
 	if json.Unmarshal(raw, &name) == nil {
-		if name == "validation" || name == "test" {
+		if KnownWindow(name) {
 			return name, nil
 		}
-		return "", errors.New(`window must be "validation" or "test"`)
+		return "", errors.New("window must be " + windowChoices)
 	}
 	var custom struct {
 		Start string `json:"start"`
 		End   string `json:"end"`
 	}
 	if json.Unmarshal(raw, &custom) == nil && custom.Start != "" && custom.End != "" {
-		return "", errors.New(`custom windows are not supported yet; use "validation" or "test"`)
+		return "", errors.New("custom windows are not supported yet; use " + windowChoices)
 	}
-	return "", errors.New(`window must be "validation", "test" or {"start","end"}`)
+	return "", errors.New("window must be " + windowChoices)
 }
 
 func num(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
@@ -151,7 +169,7 @@ func ParseID(id string) (Params, error) {
 		}
 		*field.dst = v
 	}
-	if parts[5] != "validation" && parts[5] != "test" {
+	if !KnownWindow(parts[5]) {
 		return Params{}, fmt.Errorf("%q is not a run id", id)
 	}
 	p.Window = parts[5]

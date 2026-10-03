@@ -19,7 +19,6 @@ import (
 	"climate-hacktion-curtailment/backend/internal/model/battery"
 	"climate-hacktion-curtailment/backend/internal/model/data"
 	"climate-hacktion-curtailment/backend/internal/model/forecast"
-	"climate-hacktion-curtailment/backend/internal/model/planner"
 	"climate-hacktion-curtailment/backend/internal/model/runfile"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/model/synthetic"
@@ -50,11 +49,11 @@ func TestModelRunFileIsServedByTheAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec, _ := battery.NewSpec(10.5, 10, 5, 5, 15, 0)
-	res, err := simulate.Run(m, in, spec, start, end, planner.Economic, nil)
+	res, err := simulate.Run(m, in, spec, start, end, simulate.DefaultOptions(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := runfile.Build(res, runfile.Options{ID: "gen-test", WindowName: "validation", DetailEvery: 12, WearAUDPerKWh: 0.05, TrainedBefore: "19 Aug 2026"})
+	file, err := runfile.Build(res, runfile.Options{ID: "gen-test", WindowName: "validation", DetailEvery: 12, TrainedBefore: "19 Aug 2026"})
 	if err != nil {
 		t.Fatal(err)
 	}

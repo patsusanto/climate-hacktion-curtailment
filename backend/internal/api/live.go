@@ -45,12 +45,18 @@ func WithLogger(l *log.Logger) Option { return func(s *Server) { s.log = l } }
 // DefaultRatePerMinute is how many live runs one client may start in a minute.
 const DefaultRatePerMinute = 12
 
+// stepsPerRun is how many step details a client may ask the worker for per live run it may
+// start. Clicking through a run asks for a few; the limit stops step requests being used to make
+// the worker compute houses without counting as runs.
+const stepsPerRun = 10
+
 // live is the connection to the model worker.
 type live struct {
 	base   *url.URL
 	client *http.Client
 	tokens TokenSource // nil: the worker needs no identity token
-	limit  *limiter    // nil: no limit
+	limit  *limiter    // live runs; nil: no limit
+	steps  *limiter    // step details from the worker; nil: no limit
 	log    *log.Logger
 }
 
@@ -75,6 +81,7 @@ func newLive(s *Server) (*live, error) {
 	}
 	if s.ratePerMinute > 0 {
 		lv.limit = newLimiter(s.ratePerMinute)
+		lv.steps = newLimiter(s.ratePerMinute * stepsPerRun)
 	}
 	return lv, nil
 }
@@ -215,6 +222,14 @@ func (s *Server) liveRun(w http.ResponseWriter, r *http.Request, p wire.Params, 
 // liveStep asks the worker for the detail of one step.
 func (s *Server) liveStep(w http.ResponseWriter, r *http.Request, p wire.Params, step string) {
 	lv := s.live
+	if lv.steps != nil {
+		if ok, retry := lv.steps.allow(clientIP(r)); !ok {
+			secs := int(retry.Seconds()) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("too many requests; try again in %d seconds", secs))
+			return
+		}
+	}
 	req, err := lv.request(r.Context(), http.MethodGet, "/v1/playground/run/"+p.ID()+"/steps/"+url.PathEscape(step), nil, nil)
 	if err != nil {
 		lv.log.Printf("live step %s/%s: %v", p.ID(), step, err)

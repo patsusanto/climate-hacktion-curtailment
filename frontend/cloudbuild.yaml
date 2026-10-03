@@ -28,6 +28,8 @@ steps:
       - --allow-unauthenticated
       # Long enough for the playground event stream
       - --timeout=900
+      # A cap on instances, so a flood of requests cannot scale up the bill
+      - --max-instances=3
 
 options:
   # Lets _IMAGE reference the other substitutions

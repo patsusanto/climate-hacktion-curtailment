@@ -27,18 +27,18 @@ import (
 )
 
 const (
-	// HorizonSteps is 8 hours of 5-minute steps.
-	HorizonSteps     = 96
+	// ForecastSteps is the 8 hours the forecasts cover, in 5-minute steps.
+	ForecastSteps    = 96
 	passthroughGuard = 1e-5 // $/kWh on battery throughput
 	forcedClipExtra  = 1e-4 // $/kWh on clipping in forced_only mode
 )
 
 // Curtail is how the plan may clip solar.
-type Curtail string
+type Curtail = battery.Clip
 
 const (
-	Economic   Curtail = "economic"
-	ForcedOnly Curtail = "forced_only"
+	Economic   = battery.ClipEconomic
+	ForcedOnly = battery.ClipForcedOnly
 )
 
 // pwl is a convex piecewise-linear function on [x0, x0 + sum(len)]: its value at x0, then
@@ -68,18 +68,6 @@ func (f *pwl) eval(x float64) float64 {
 		at += l
 	}
 	return y
-}
-
-// knots returns the breakpoints and their values.
-func (f *pwl) knots() (xs, ys []float64) {
-	xs, ys = []float64{f.x0}, []float64{f.y0}
-	x, y := f.x0, f.y0
-	for k, l := range f.length {
-		x += l
-		y += f.slope[k] * l
-		xs, ys = append(xs, x), append(ys, y)
-	}
-	return xs, ys
 }
 
 // hull builds the lower convex hull through points sorted by x.
@@ -112,43 +100,35 @@ func hull(xs, ys []float64) *pwl {
 	return f
 }
 
-// step is one horizon step's inputs in kWh and $/kWh.
+// step is one horizon step: prices in $/kWh, energy in kWh, and the most the battery can move
+// and the house can export in it (a step can stand for several 5-minute intervals).
 type step struct {
-	spot, pv, load float64
+	price     battery.Prices
+	pv, load  float64
+	pMax, cap float64
 }
 
 type problem struct {
-	spec    battery.Spec
 	curtail Curtail
 	eta     float64 // one leg's efficiency
-	pMax    float64 // kWh per step
-	cap     float64 // kWh per step
 	w       float64 // $/kWh of throughput
 }
 
 // bRange is the battery's AC energy range for the step (+ charge, - discharge).
 func (p *problem) bRange(s step) (lo, hi float64) {
-	if s.spot < 0 {
-		return 0, p.pMax // no discharging at a negative price
+	if s.price.Export < 0 {
+		return 0, s.pMax // no discharging at a negative price
 	}
-	return -math.Min(p.pMax, s.load+p.cap), p.pMax // a discharge can cover the load and fill the cap
+	return -math.Min(s.pMax, s.load+s.cap), s.pMax // a discharge can cover the load and fill the cap
 }
 
-// cost of the step's grid flows when the battery moves b kWh (AC), the flows chosen optimally.
+// cost of the step when the battery moves b kWh (AC), with solar clipped or exported at best.
 func (p *problem) cost(s step, b float64) float64 {
-	wear := p.w * math.Abs(b)
-	if s.spot < 0 && p.curtail == Economic {
-		return s.spot*(s.load+b) + wear // clip all solar, buy the load and the charge, and be paid
+	_, c := battery.GridNet(b, s.pv, s.load, s.cap, s.price, p.curtail)
+	if p.curtail == ForcedOnly { // clipping that the cap forces costs what exporting would, and a little
+		c += (math.Max(-s.price.Export, 0) + forcedClipExtra) * math.Max(s.pv-s.load-b-s.cap, 0)
 	}
-	x := s.load - s.pv + b // net demand on the grid
-	if x >= -p.cap {
-		return s.spot*x + wear
-	}
-	clip := 0.0
-	if p.curtail == ForcedOnly {
-		clip = math.Max(-s.spot, 0) + forcedClipExtra
-	}
-	return -s.spot*p.cap + clip*(-x-p.cap) + wear
+	return c + p.w*math.Abs(b)
 }
 
 // soc change for an AC energy b, and back.
@@ -166,10 +146,11 @@ func (p *problem) ac(d float64) float64 {
 	return d * p.eta
 }
 
-// stepCost is the step's cost as a convex function of the SOC change.
+// stepCost is the step's cost as a convex function of the SOC change. The cost is linear in b
+// between the points where the battery, the solar and the export cap change roles.
 func (p *problem) stepCost(s step) *pwl {
 	lo, hi := p.bRange(s)
-	bs := []float64{lo, hi, 0, -(s.load - s.pv) - p.cap}
+	bs := []float64{lo, hi, 0, s.pv - s.load - s.cap, s.pv - s.load, -s.load}
 	sort.Float64s(bs)
 	var xs, ys []float64
 	for _, b := range bs {
@@ -193,7 +174,7 @@ func infConv(v, h *pwl) *pwl {
 		gs[k] = -h.slope[n-1-k]
 	}
 	he := h.end()
-	out := &pwl{x0: v.x0 - he, y0: v.y0 + h.eval(he)}
+	out := &pwl{x0: v.x0 - he, y0: v.y0 + h.eval(he), length: make([]float64, 0, len(v.slope)+n), slope: make([]float64, 0, len(v.slope)+n)}
 	i, j := 0, 0
 	for i < len(v.slope) || j < n {
 		if j == n || (i < len(v.slope) && v.slope[i] <= gs[j]) {
@@ -209,7 +190,7 @@ func infConv(v, h *pwl) *pwl {
 
 // restrict cuts f to [lo, hi], merging segments of equal slope.
 func restrict(f *pwl, lo, hi float64) *pwl {
-	out := &pwl{x0: lo, y0: f.eval(lo)}
+	out := &pwl{x0: lo, y0: f.eval(lo), length: make([]float64, 0, len(f.length)), slope: make([]float64, 0, len(f.length))}
 	at := f.x0
 	for k, l := range f.length {
 		a, b := math.Max(at, lo), math.Min(at+l, hi)
@@ -226,92 +207,176 @@ func restrict(f *pwl, lo, hi float64) *pwl {
 	return out
 }
 
-// Plan returns the first step's flows for the horizon (prices $/MWh, PV and load kW).
-func Plan(soc float64, price, pvKW, loadKW []float64, spec battery.Spec, curtail Curtail) (battery.Flows, error) {
-	f, _, err := solve(soc, price, pvKW, loadKW, spec, curtail)
-	return f, err
+// Horizon is what the planner plans on, one entry per 5-minute step from now: the prices
+// ($/kWh) and the PV and load (kW). Step 0 is the interval about to start.
+type Horizon struct {
+	Price    []battery.Prices
+	PV, Load []float64
+	// Intervals is how many 5-minute intervals each step stands for (its prices, PV and load are
+	// the averages over them). Nil means one each.
+	Intervals []int
 }
 
-// solve returns the first step's flows and the horizon's optimal cost ($).
-func solve(soc float64, price, pvKW, loadKW []float64, spec battery.Spec, curtail Curtail) (battery.Flows, float64, error) {
+// Plan is the planner's answer.
+type Plan struct {
+	First battery.Flows // what to do in the next 5 minutes
+	// The whole plan: battery AC energy per step (kWh, + charge) and the charge after each step.
+	Battery, SOC []float64
+	// Start is when each step starts, in 5-minute intervals from now.
+	Start []int
+	Cost  float64 // the plan's cost over the horizon ($, wear included)
+}
+
+// Solve finds the cheapest plan from charge soc (kWh). The battery's wear (spec.WearAUDPerKWh)
+// is part of the cost, so it cycles only when the price difference pays for the wear.
+func Solve(soc float64, h Horizon, spec battery.Spec, curtail Curtail) (Plan, error) {
 	if curtail != Economic && curtail != ForcedOnly {
-		return battery.Flows{}, 0, fmt.Errorf("curtail must be %q or %q", Economic, ForcedOnly)
+		return Plan{}, fmt.Errorf("curtail must be %q or %q", Economic, ForcedOnly)
 	}
-	n := len(price)
-	p := &problem{spec: spec, curtail: curtail, eta: spec.Leg(), pMax: spec.MaxPowerKW * battery.IntervalHours,
-		cap: spec.ExportCapKW * battery.IntervalHours, w: spec.WearAUDPerKWh + passthroughGuard}
+	n := len(h.Price)
+	if n == 0 || len(h.PV) != n || len(h.Load) != n {
+		return Plan{}, fmt.Errorf("planner: the horizon's prices, PV and load must have the same length")
+	}
+	if h.Intervals != nil && len(h.Intervals) != n {
+		return Plan{}, fmt.Errorf("planner: the horizon's intervals must match its steps")
+	}
+	p := &problem{curtail: curtail, eta: spec.Leg(), w: spec.WearAUDPerKWh + passthroughGuard}
 	steps := make([]step, n)
+	costs := make([]*pwl, n)
+	start := make([]int, n)
+	at0 := 0
 	for k := range steps {
-		steps[k] = step{spot: price[k] / 1000, pv: math.Max(pvKW[k], 0) * battery.IntervalHours, load: math.Max(loadKW[k], 0) * battery.IntervalHours}
+		m := 1
+		if h.Intervals != nil {
+			m = max(h.Intervals[k], 1)
+		}
+		dt := float64(m) * battery.IntervalHours
+		steps[k] = step{price: h.Price[k], pv: math.Max(h.PV[k], 0) * dt, load: math.Max(h.Load[k], 0) * dt,
+			pMax: spec.MaxPowerKW * dt, cap: spec.ExportCapKW * dt}
+		costs[k] = p.stepCost(steps[k])
+		start[k] = at0
+		at0 += m
 	}
 	lo, hi := spec.SOCMin(), spec.SOCMax()
 	soc = math.Min(math.Max(soc, lo), hi)
 
-	v := &pwl{x0: lo, y0: 0, length: []float64{hi - lo}, slope: []float64{0}} // nothing after the horizon
+	// Backwards: v[k] is the cheapest cost of steps k..n-1 as a function of the charge before k.
+	v := make([]*pwl, n+1)
+	v[n] = &pwl{x0: lo, y0: 0, length: []float64{hi - lo}, slope: []float64{0}} // nothing after the horizon
 	for k := n - 1; k >= 1; k-- {
-		v = restrict(infConv(v, p.stepCost(steps[k])), lo, hi)
+		v[k] = restrict(infConv(v[k+1], costs[k]), lo, hi)
 	}
 
-	// The first step: minimise h(d) + V(soc + d) over its breakpoints and V's.
-	h := p.stepCost(steps[0])
-	dLo, dHi := math.Max(h.x0, lo-soc), math.Min(h.end(), hi-soc)
-	cands := []float64{dLo, dHi, 0}
-	hx, _ := h.knots()
-	vx, _ := v.knots()
-	cands = append(cands, hx...)
-	for _, x := range vx {
-		cands = append(cands, x-soc)
-	}
-	best, bestCost := 0.0, math.Inf(1)
-	for _, d := range cands {
-		if d < dLo-1e-12 || d > dHi+1e-12 {
-			continue
+	// Forwards: at each step take the best move given the cost-to-go after it.
+	plan := Plan{Battery: make([]float64, n), SOC: make([]float64, n), Start: start}
+	at := soc
+	for k := 0; k < n; k++ {
+		d, c := best(costs[k], v[k+1], at, lo, hi)
+		if k == 0 {
+			plan.Cost = c
 		}
-		d = math.Min(math.Max(d, dLo), dHi)
-		c := h.eval(d) + v.eval(soc+d)
-		if c < bestCost-1e-12 || (math.Abs(c-bestCost) <= 1e-12 && math.Abs(d) < math.Abs(best)) {
-			best, bestCost = d, c
-		}
+		plan.Battery[k] = p.ac(d)
+		at = math.Min(math.Max(at+d, lo), hi)
+		plan.SOC[k] = at
 	}
-	return p.flows(steps[0], p.ac(best)), bestCost, nil
-}
-
-// flows spells out the first step for an AC battery energy b, the way the LP would route it.
-func (p *problem) flows(s step, b float64) battery.Flows {
+	s := steps[0]
+	b := plan.Battery[0]
 	if math.Abs(b) < 1e-12 {
 		b = 0
 	}
-	var f battery.Flows
-	if s.spot < 0 && p.curtail == Economic {
-		f.PVClipped, f.GridToLoad, f.GridToBattery = s.pv, s.load, math.Max(b, 0)
-		return f
-	}
-	if b >= 0 {
-		f.PVToLoad = math.Min(s.pv, s.load)
-		residual := s.pv - f.PVToLoad
-		f.PVToBattery = math.Min(b, residual)
-		f.GridToBattery = b - f.PVToBattery
-		f.GridToLoad = s.load - f.PVToLoad
-		f.PVToExport = math.Min(residual-f.PVToBattery, p.cap)
-		f.PVClipped = residual - f.PVToBattery - f.PVToExport
-		return f
-	}
-	d := -b
-	unmet := math.Max(s.load-s.pv, 0)
-	f.BatteryToExport = math.Min(math.Max(d-unmet, 0), p.cap)
-	f.BatteryToLoad = d - f.BatteryToExport
-	f.PVToLoad = math.Min(s.pv, s.load-f.BatteryToLoad)
-	f.GridToLoad = s.load - f.PVToLoad - f.BatteryToLoad
-	f.PVToExport = math.Min(s.pv-f.PVToLoad, math.Max(p.cap-f.BatteryToExport, 0))
-	f.PVClipped = s.pv - f.PVToLoad - f.PVToExport
-	return f
+	net, _ := battery.GridNet(b, s.pv, s.load, s.cap, s.price, curtail)
+	plan.First = battery.Route(b, net, s.pv, s.load)
+	return plan, nil
 }
 
-// Path is 96 steps from the value now through the forecasts at the leads (linear between).
+// best minimises h(d) + v(soc + d) over the charge changes the step allows. The sum is convex
+// and piecewise linear, so it walks the breakpoints from the left until the slope turns
+// non-negative. Where the minimum is flat, it takes the smallest move.
+func best(h, v *pwl, soc, lo, hi float64) (d, cost float64) {
+	const eps = 1e-12
+	dLo, dHi := math.Max(h.x0, lo-soc), math.Min(h.end(), hi-soc)
+	if dHi < dLo {
+		dHi = dLo
+	}
+	hs, vs := newCursor(h, dLo), newCursor(v, soc+dLo)
+	x := dLo
+	// step moves x to the next breakpoint of either function. At large sizes (a solar farm's MWh)
+	// rounding can leave a cursor just short of x; it is then moved on, so the walk always ends.
+	step := func() {
+		nx := math.Min(dHi, math.Min(hs.next(), vs.next()-soc))
+		if nx > x {
+			x = nx
+			hs.seek(x)
+			vs.seek(soc + x)
+			return
+		}
+		if hs.next() <= x {
+			hs.advance()
+		} else {
+			vs.advance()
+		}
+	}
+	for x < dHi-eps && hs.slope()+vs.slope() < -eps {
+		step()
+	}
+	left := x
+	for x < dHi-eps && hs.slope()+vs.slope() <= eps { // a flat bottom: find where it ends
+		step()
+	}
+	d = math.Min(math.Max(0, left), math.Max(left, x)) // 0 if the flat bottom [left, x] holds it
+	return d, h.eval(d) + v.eval(soc+d)
+}
+
+// cursor walks a pwl's segments left to right.
+type cursor struct {
+	f  *pwl
+	k  int     // segment index
+	at float64 // where segment k starts
+}
+
+func newCursor(f *pwl, x float64) *cursor {
+	c := &cursor{f: f, at: f.x0}
+	c.seek(x)
+	return c
+}
+
+// seek moves to the segment that continues right of x.
+func (c *cursor) seek(x float64) {
+	for c.k < len(c.f.length) && c.at+c.f.length[c.k] <= x+1e-15 {
+		c.at += c.f.length[c.k]
+		c.k++
+	}
+}
+
+// advance moves to the next segment.
+func (c *cursor) advance() {
+	if c.k < len(c.f.length) {
+		c.at += c.f.length[c.k]
+		c.k++
+	}
+}
+
+// slope right of the cursor (0 past the end).
+func (c *cursor) slope() float64 {
+	if c.k >= len(c.f.slope) {
+		return 0
+	}
+	return c.f.slope[c.k]
+}
+
+// next is the end of the current segment.
+func (c *cursor) next() float64 {
+	if c.k >= len(c.f.length) {
+		return math.Inf(1)
+	}
+	return c.at + c.f.length[c.k]
+}
+
+// Path is ForecastSteps (8 hours) from the value now through the forecasts at the leads (linear between).
 func Path(now float64, leads []int, values []float64) []float64 {
 	knots := append([]int{0}, leads...)
 	ys := append([]float64{now}, values...)
-	out := make([]float64, HorizonSteps)
+	out := make([]float64, ForecastSteps)
 	for i := range out {
 		k := sort.SearchInts(knots, i)
 		switch {

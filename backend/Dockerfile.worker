@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # The live model service. Build with: docker build -f Dockerfile.worker -t worker .
-# The window data (backend/data/<window>/*.csv) is committed to the repo and baked in at /data.
+# The data (backend/data/<window>/*.csv, and the payback year in backend/data/year/*.csv.gz) is
+# committed to the repo and baked in at /data.
 ARG GO_VERSION=1.27
 
 # ---- build stage ----
