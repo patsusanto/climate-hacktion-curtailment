@@ -6,7 +6,9 @@ import Decision from './Decision'
 import Payback from './Payback'
 import { Mascot } from '../mascot/Mascot'
 import { kwh, money } from './format'
+import { seasonLabel } from './types'
 import type {
+  Season,
   PlaygroundMeta,
   PlaygroundRequest,
   PlaygroundSummary,
@@ -28,6 +30,7 @@ export default function Playground() {
   const [batteryKw, setBatteryKw] = useState('')
   const [exportCap, setExportCap] = useState('')
   const [dailyLoad, setDailyLoad] = useState('')
+  const [season, setSeason] = useState<Season>('summer')
 
   const [status, setStatus] = useState<Status>('idle')
   const [formError, setFormError] = useState<string | null>(null)
@@ -137,6 +140,7 @@ export default function Playground() {
         batteryKw,
         exportCap,
         dailyLoad,
+        season,
       })
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Check the form.')
@@ -160,6 +164,7 @@ export default function Playground() {
         batteryKw: '',
         exportCap: '',
         dailyLoad: scenario.dailyLoad,
+        season,
       }),
     )
   }
@@ -342,6 +347,23 @@ export default function Playground() {
                 onChange={(event) => setDailyLoad(event.target.value)}
               />
             </label>
+            <fieldset className="span-3 season">
+              <legend className="eyebrow">Season</legend>
+              <div className="season-options">
+                {(Object.keys(seasonLabel) as Season[]).map((s) => (
+                  <label key={s} className={season === s ? 'season-option on' : 'season-option'}>
+                    <input
+                      type="radio"
+                      name="season"
+                      value={s}
+                      checked={season === s}
+                      onChange={() => setSeason(s)}
+                    />
+                    {seasonLabel[s]}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <div className="span-3 actions">
               <button className="primary" type="submit" disabled={status === 'streaming'}>
                 {status === 'streaming' ? 'Running' : 'Run'}
@@ -662,6 +684,7 @@ function toRequest(input: {
   batteryKw: string
   exportCap: string
   dailyLoad: string
+  season: Season
 }): PlaygroundRequest {
   const address = input.address.trim()
   if (!address) throw new Error('Add an address.')
@@ -671,7 +694,7 @@ function toRequest(input: {
     address,
     pv_kw_ac: pvKw,
     battery_kwh: batteryKwh,
-    window: 'validation',
+    window: input.season,
   }
   const power = optionalNumber('Battery kW', input.batteryKw, false)
   const cap = optionalNumber('Export cap', input.exportCap, true)

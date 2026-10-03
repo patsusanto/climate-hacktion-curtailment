@@ -7,7 +7,16 @@ export interface PlaygroundRequest {
   battery_kw?: number
   export_cap_kw?: number
   daily_load_kwh?: number
-  window: 'validation' | 'test' | { start: string; end: string }
+  /** summer: Dec 2025 - Feb 2026. validation: winter, 16 Jul - 18 Aug 2026. test: 19 Aug - 9 Sep 2026. */
+  window: Season | 'test' | { start: string; end: string }
+}
+
+/** The seasons the page offers: summer, or winter (the validation window). */
+export type Season = 'summer' | 'validation'
+
+export const seasonLabel: Record<Season, string> = {
+  summer: 'Summer',
+  validation: 'Winter',
 }
 
 export type PlaygroundEvent =

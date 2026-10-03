@@ -58,7 +58,7 @@ export default function Payback({ payback, spec }: Props) {
           <p className="note">
             a year, saving {money(plannerSaves)}.{' '}
             {plannerYears != null ? `Pays back in ${yearsText(plannerYears)}` : 'Never pays back'}
-            {sooner != null && sooner > 0.05 ? `, ${yearsText(sooner)} sooner.` : '.'}
+            {sooner != null && sooner > 0.05 ? `, ${sooner.toFixed(1)} years sooner.` : '.'}
           </p>
         </article>
       </div>

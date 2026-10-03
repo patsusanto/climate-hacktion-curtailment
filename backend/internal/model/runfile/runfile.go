@@ -24,7 +24,7 @@ import (
 // Options are the run's labels and what to keep.
 type Options struct {
 	ID            string
-	WindowName    string  // "validation" or "test"
+	WindowName    string  // one of data.Windows
 	DetailEvery   int     // keep the forecast detail for every Nth step (the file grows ~3 KB per kept step)
 	TrainedBefore string  // shown in the note, e.g. "19 Aug 2026"
 }
@@ -41,7 +41,7 @@ func Meta(spec battery.Spec, sim simulate.Options, start, end time.Time, n int, 
 			Lat:         house.Lat,
 			Lon:         house.Lon,
 			Note: "The house runs on Sydney's observed weather and NSW1 spot prices whatever the address. " +
-				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + ".",
+				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + "." + seenNote(start, opt.TrainedBefore),
 			Tariff: sim.Tariff.Describe(),
 		},
 		Spec: wire.Spec{
@@ -258,4 +258,13 @@ func roundAll(v []float64, places int) []float64 {
 		out[i] = round(x, places)
 	}
 	return out
+}
+
+// seenNote warns when the window is data the models were trained on.
+func seenNote(start time.Time, trainedBefore string) string {
+	cut, err := time.ParseInLocation("2 Jan 2006", trainedBefore, start.Location())
+	if err != nil || !start.Before(cut) {
+		return ""
+	}
+	return " They were trained on this period too, so the forecasts here are better than they would be on days they had not seen."
 }

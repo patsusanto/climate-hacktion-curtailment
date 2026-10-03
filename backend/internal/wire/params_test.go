@@ -49,7 +49,7 @@ func TestResolveRejectsBadRequests(t *testing.T) {
 		"zero load":      {func(r *PlaygroundRequest) { r.DailyLoadKwh = f(0) }, "daily_load_kwh must be greater than 0"},
 		"huge load":      {func(r *PlaygroundRequest) { r.DailyLoadKwh = f(500) }, "daily_load_kwh must be at most 200"},
 		"no window":      {func(r *PlaygroundRequest) { r.Window = nil }, "window must be"},
-		"bad window":     {func(r *PlaygroundRequest) { r.Window = json.RawMessage(`"nope"`) }, `window must be "validation" or "test"`},
+		"bad window":     {func(r *PlaygroundRequest) { r.Window = json.RawMessage(`"nope"`) }, `window must be "summer", "validation" or "test"`},
 		"custom window":  {func(r *PlaygroundRequest) { r.Window = json.RawMessage(`{"start":"a","end":"b"}`) }, "custom windows are not supported"},
 	}
 	for name, c := range cases {
