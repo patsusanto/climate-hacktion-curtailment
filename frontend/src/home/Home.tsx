@@ -367,28 +367,6 @@ function Beat({ active }: { active: boolean }) {
   )
 }
 
-function Count({ to, play }: { to: number; play: boolean }) {
-  const [value, setValue] = useState(reducedMotion() ? to : 0)
-  useEffect(() => {
-    if (!play) return
-    if (reducedMotion()) {
-      setValue(to)
-      return
-    }
-    const start = performance.now()
-    let frame = 0
-    const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / 900)
-      const eased = 1 - (1 - t) ** 3
-      setValue(to * eased)
-      if (t < 1) frame = requestAnimationFrame(tick)
-    }
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
-  }, [play, to])
-  return <>{aud(value)}</>
-}
-
 function useShown<T extends HTMLElement>() {
   const ref = useRef<T>(null)
   const [shown, setShown] = useState(reducedMotion())

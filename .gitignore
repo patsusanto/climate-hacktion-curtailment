@@ -10,3 +10,6 @@
 
 # Output of backend/analysis/stats (regenerate with go run ./analysis/stats)
 /backend/analysis/stats/results/
+
+# Dependencies are installed, never committed (the frontend has its own package.json)
+node_modules/

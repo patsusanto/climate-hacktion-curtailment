@@ -78,6 +78,8 @@ type Tick struct {
 	// that strategy has paid). The planner's cost so far is CumulativeSelfAud - CumulativeSavingsAud.
 	CumulativeSelfAud    float64 `json:"cumulative_self_aud"`
 	CumulativeSavingsAud float64 `json:"cumulative_savings_aud"`
+	// CumulativeSupplyAud is the daily supply charge accrued so far, the same on both bills.
+	CumulativeSupplyAud float64 `json:"cumulative_supply_aud"`
 	// What one kWh cost to import and earned exported this step ($/kWh, the tariff applied).
 	ImportAudKwh float64 `json:"import_aud_kwh"`
 	ExportAudKwh float64 `json:"export_aud_kwh"`
