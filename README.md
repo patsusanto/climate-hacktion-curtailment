@@ -1,4 +1,4 @@
-# climate-hacktion-curtailment
+# Cubert.ai
 
 ## Backend
 
