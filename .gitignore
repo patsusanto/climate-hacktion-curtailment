@@ -7,3 +7,6 @@
 
 # Trained Python model files; they belong with the Python project, not here
 *.joblib
+
+# Output of backend/analysis/stats (regenerate with go run ./analysis/stats)
+/backend/analysis/stats/results/
