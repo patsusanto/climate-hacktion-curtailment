@@ -64,45 +64,59 @@ The house is on a spot pass-through plan (like Amber) on Ausgrid's network:
 - **Self-consumption**, the battery's default setting and the baseline: it stores spare solar and covers the house from the battery, ignoring prices.
 - **Reasons:** each step's reason comes from the plan it acted on. It says what the stored energy is for and when, or why it is buying, selling, holding or clipping.
 
-**How it compares with self-consumption,** with wear counted for both (dollars saved over the window; negative means self-consumption did better):
+**How it compares with self-consumption,** with wear counted for both (dollars saved over the window; negative means self-consumption did better). These are the page's houses (export cap 5 kW). Every window is data the model never saw:
 
-| House (PV kW / battery kWh / export cap kW / load kWh a day) | Validation, 16 Jul – 18 Aug | Test, 19 Aug – 9 Sep (unseen) |
-|---|---|---|
-| 6.6 / 13.5 / 5 / 18 | +0.87 | +1.11 |
-| 6.6 / 13.5 / 1.5 / 18 | +2.13 | +1.81 |
-| 6.6 / 13.5 / 5 / 40 | +8.24 | +3.62 |
-| 10.5 / 10 / 5 / 15 | +3.06 | +2.41 |
-| 10 / 5 / 1.5 / 30 | +5.36 | +1.95 |
-| 6.6 / 13.5 / 10 / 8 | +4.16 | +2.26 |
-| 10 / 27 / 5 / 30 | +0.74 | +0.64 |
-| 3.3 / 6.5 / 5 / 12 | −0.06 | +0.61 |
-| 3.3 / 6.5 / 0 / 12 | −0.45 | +0.33 |
-| 6.6 / 13.5 / 0 / 18 | −1.43 | −0.21 |
-| 10 / 27 / 0 / 30 | −1.67 | −1.39 |
+| House (PV kW / battery kWh / load kWh a day) | Summer, 1 Dec – 28 Feb | Winter, 16 Jul – 18 Aug | Test, 19 Aug – 9 Sep |
+|---|---|---|---|
+| 3.3 / 6.5 / 12 (Small roof) | +47.35 | −0.18 | +0.64 |
+| 6.6 / 13.5 / 18 (Family home) | +47.99 | −0.30 | +1.01 |
+| 10 / 27 / 30 (All-electric) | +67.44 | −1.59 | +0.45 |
+| 10.5 / 10 / 15 (default) | | +2.24 | |
 
-These figures are from just before the hourly far horizon was added; that change moved bills by cents.
+- **Summer:** most of the value is here. Self-consumption keeps exporting at negative midday prices and the planner doesn't, and it times the evening peak.
+- **Winter:** there's little to gain, and the forecasts for it are the oldest (eight months past the training data), so the planner roughly breaks even.
 
-The planner's old setup (spot prices only, no wear, 8 hours ahead) lost to self-consumption in every one of these houses once wear was counted. The changes behind the improvement:
+The planner's old setup (spot prices only, no wear, 8 hours ahead) lost to self-consumption in every house tested once wear was counted. The changes behind the improvement:
 
 - the real tariff;
 - wear in the plan;
 - the 24-hour look-ahead;
 - storing solar that would be clipped.
 
-A fallback that hands a step to self-consumption when the plan's expected gain is small was also tried. It cost slightly more than it saved, so it's off (`Options.FallbackAUD`).
+A fallback that hands a step to self-consumption when the plan's expected gain is small was also tried. It cost slightly more than it saved, so it's off (`Options.FallbackAUD`). These choices were made by looking at the winter and test windows, so summer is the cleanest evidence for them.
 
 **When it loses:** houses that can't export, or with a small battery for their solar and demand. The planner has little to work with there, so the run's summary carries a warning whenever self-consumption came out ahead.
 
+## One model, shown only on data it never saw
+
+There is one trained model, fitted on data before 1 Dec 2025 (`TRAIN_CUTOFF` in the training repo). Everything the playground replays comes after that date: the three windows and the payback year. No window is in the model's training data.
+
+The price model's error (pinball loss; lower is better) on each window:
+
+| Window | Error | Average miss on the P50 price |
+|---|---|---|
+| Summer, Dec 2025 – Feb 2026 | 13.46 | $33.70/MWh |
+| Winter, 16 Jul – 18 Aug 2026 | 5.88 | $18.10/MWh |
+| Test, 19 Aug – 9 Sep 2026 | 5.28 | $16.10/MWh |
+
+Summer's error is higher because summer prices are more volatile, not because the model is worse there.
+
+**The trade-off is staleness.** A model forecasts best just after its training data, and gets worse as the market moves on. A model trained on data up to 19 Aug 2026 scored 4.03 on the same test window, against this model's 5.28. A live system would be retrained regularly, say monthly, and each period forecast by the latest model before it. This playground uses one model so every result is cleanly out of sample, and the later months are somewhat pessimistic as a result.
+
+**Remaining caveat:** the training pipeline chose its features and settings on Apr–Sep 2026, and the planner's changes were chosen on the winter and test windows. Those windows influenced the design, though not the model's weights. Summer influenced neither.
+
 ## Payback
 
-`RunAnnual` replays 13 weeks, one every four weeks from 19 Sep 2025 to 18 Sep 2026 (so every season is in it), and scales them to a year. It produces three annual bills: the house with no solar and no battery (all demand from the grid), self-consumption, and the planner. Both battery bills include wear.
+`RunAnnual` replays 14 weeks, one every three weeks from 1 Dec 2025 to 18 Sep 2026, and scales them to a year. That span runs from where the model's training data ends to where the AEMO pre-dispatch data ends, so it's all unseen. It covers 10 months; October and November are missing and are assumed to be like the rest. It produces three annual bills: the house with no solar and no battery (all demand from the grid), self-consumption, and the planner. Both battery bills include wear.
 
 `payback` prices the system: solar at $900/kW installed after the STC rebate, and the battery at $800/kWh before the federal Cheaper Home Batteries rebate. That rebate is $272/kWh at the May–Dec 2026 rate: in full for the first 14 kWh, 60% from 14 to 28 kWh, and 15% from 28 to 50 kWh. Payback years are the system cost divided by the yearly saving against no solar and no battery. The page lets people enter their own prices.
 
+For the page's houses, the planner pays back about a year sooner than self-consumption: 7.3 vs 8.3 years for the Small roof, 9.2 vs 10.2 for the Family home, and 11.2 vs 11.9 for the All-electric house.
+
 Treat payback as an estimate:
 
-- **Most of the year is training data.** The models were trained on data before 19 Aug 2026.
-- **A few events drive it.** Most of the planner's yearly gain comes from spring and summer, when it avoids exporting at negative prices, and from a handful of price spikes. Spikes can swing a sampled week by $20 either way. Winter weeks save under $1.
+- **A few events drive it.** Most of the planner's yearly gain comes from summer, when it avoids exporting at negative prices, and from a handful of price spikes. Spikes can swing a sampled week by $20 either way.
+- **October and November are missing.** Spring often has negative midday prices, so the missing months probably understate the planner's advantage.
 - **It is simple payback.** It ignores price changes, panel ageing and finance costs.
 
 ## What is inside
@@ -113,7 +127,7 @@ Treat payback as an estimate:
 | **Solar and demand model** | Linear regression on recent solar and demand, clear-sky geometry and day-ahead Sydney weather, at the same leads. |
 | **The house** | A Sydney roof and an evening-peak household, built from observed weather. Its noise is the training house's (`models/noise_*.bin`), so the same weather gives the same house. |
 
-The models were trained on data before 19 Aug 2026. Over four months they never saw (Dec 2025 – Mar 2026), the price model's error was 27% below the best simple baseline. The forecasts match the Python training code on all 6,336 steps of 19 Aug – 9 Sep 2026, to the rounding of the output.
+The model was trained on data before 1 Dec 2025. Over the four months after that (Dec 2025 – Mar 2026), the price model's error was 27% below the best simple baseline. The Go forecasts match the Python training code to the rounding of the output.
 
 **Data:** `backend/data/validation` and `test` are the replay windows. `backend/data/year` (gzipped, 3.8 MB) is the payback year, built from the same AEMO and Open-Meteo sources as `fetch`; where it overlaps the validation window, every value matches the fetched data.
 

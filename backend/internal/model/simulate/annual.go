@@ -10,9 +10,9 @@ import (
 	"climate-hacktion-curtailment/backend/internal/model/forecast"
 )
 
-// AnnualWeeks is how many weeks the payback estimate replays: one every four weeks, so every
-// season is in it.
-const AnnualWeeks = 13
+// AnnualWeeks is how many weeks the payback estimate replays: one every three weeks of
+// data.Year, so every season in it is sampled.
+const AnnualWeeks = 14
 
 // Annual is a year of bills for one house, scaled up from sample weeks spread over the year.
 type Annual struct {

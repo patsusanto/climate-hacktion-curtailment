@@ -27,7 +27,7 @@ func reason(s Step, plan planner.Plan, h planner.Horizon, now time.Time, spec ba
 	switch st.Action {
 	case battery.Charge:
 		if ok {
-			return fmt.Sprintf("Buying at %s to charge, for %s, when power is forecast at %s.", cents(p.Import), when, cents(worth))
+			return fmt.Sprintf("Buying at %s to charge, to use %s, when power is forecast at %s.", cents(p.Import), when, cents(worth))
 		}
 		return fmt.Sprintf("Buying at %s to charge while it is cheap.", cents(p.Import))
 	case battery.ChargeSurplus:
@@ -55,7 +55,7 @@ func reason(s Step, plan planner.Plan, h planner.Horizon, now time.Time, spec ba
 		}
 		return fmt.Sprintf("Battery at its floor; buying at %s.", cents(p.Import))
 	case ok:
-		return fmt.Sprintf("Saving the charge for %s, when power is forecast at %s (now %s).", when, cents(worth), cents(p.Import))
+		return fmt.Sprintf("Saving the charge to use %s, when power is forecast at %s (now %s).", when, cents(worth), cents(p.Import))
 	}
 	return "Holding: the price differences ahead do not cover the battery's wear."
 }

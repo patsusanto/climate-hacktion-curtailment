@@ -237,4 +237,4 @@ The payback figures come from a year of data in `backend/data/year/` (19 Sep 202
 
 The page offers two seasons: `summer` (1 Dec 2025 - 28 Feb 2026, data in `backend/data/summer/`, run live by the worker) and winter, which is the `validation` window. The models were trained on both, and the page says so; only `test` is out of sample.
 
-The runs in `runs/` are the validation window (16 Jul - 18 Aug 2026) for the default house (`10kw-10kwh`: 10.5 kW, 10 kWh) and the page's three scenarios. The models were trained on data before 19 Aug 2026, so these runs replay data the models have seen; the `test` window (19 Aug - 9 Sep 2026) is out of sample.
+The runs in `runs/` are the validation window (16 Jul - 18 Aug 2026) for the default house (`10kw-10kwh`: 10.5 kW, 10 kWh) and the page's three scenarios. The model was trained on data before 1 Dec 2025, so these runs, the `summer` and `test` windows and the payback year are all data it never saw.

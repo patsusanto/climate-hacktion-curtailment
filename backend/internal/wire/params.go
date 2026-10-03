@@ -102,7 +102,8 @@ func (p Params) checkHouse() error {
 
 // Windows are the replay windows a request can name. Their dates are in the model's data
 // package: summer is 1 Dec 2025 - 28 Feb 2026, validation 16 Jul - 18 Aug 2026 (winter), and
-// test 19 Aug - 9 Sep 2026 (the only one the models never saw).
+// test 19 Aug - 9 Sep 2026. The models were trained on data before 1 Dec 2025, so all three are
+// periods they never saw.
 var Windows = []string{"summer", "validation", "test"}
 
 // KnownWindow says whether name is one of Windows.
