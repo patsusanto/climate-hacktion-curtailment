@@ -41,7 +41,7 @@ func Meta(spec battery.Spec, sim simulate.Options, start, end time.Time, n int, 
 			Lat:         house.Lat,
 			Lon:         house.Lon,
 			Note: "The house runs on Sydney's observed weather and NSW1 spot prices whatever the address. " +
-				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + "." + seenNote(start, opt.TrainedBefore),
+				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + "." + modelNote(start, opt.TrainedBefore),
 			Tariff: sim.Tariff.Describe(),
 		},
 		Spec: wire.Spec{
@@ -149,7 +149,7 @@ func Summary(res *simulate.Result, opt Options) wire.Summary {
 			"can't export or the battery is small for its solar and demand.", dollars(-saved)))
 	}
 	if res.Annual != nil {
-		pb := Payback(res.Spec, *res.Annual, wear)
+		pb := Payback(res.Spec, *res.Annual, wear, opt.TrainedBefore)
 		out.Payback = &pb
 		const warranty = 10 // years; the usual battery warranty
 		switch {
@@ -163,11 +163,19 @@ func Summary(res *simulate.Result, opt Options) wire.Summary {
 }
 
 // Payback is the year of bills and what the system costs.
-func Payback(spec battery.Spec, a simulate.Annual, wear float64) wire.Payback {
+func Payback(spec battery.Spec, a simulate.Annual, wear float64, trainedBefore string) wire.Payback {
 	cost, rebate := payback.Cost(spec.PVkWAC, spec.CapacityKWh)
+	basis := fmt.Sprintf("%d weeks spread over %s - %s, scaled to a year.", a.Weeks, a.From.Format("2 Jan 2006"), a.To.Format("2 Jan 2006"))
+	if !seen(a.From, trainedBefore) {
+		basis += " The models never saw any of it."
+	} else {
+		basis += " The models were trained on part of it, so these bills are somewhat optimistic."
+	}
+	if span := a.To.Sub(a.From); span < 330*24*time.Hour {
+		basis += fmt.Sprintf(" It covers %d of 12 months; the rest of the year is assumed to be like them.", int(span.Hours()/24/30.4+0.5))
+	}
 	return wire.Payback{
-		Basis: fmt.Sprintf("%d weeks spread over %s - %s, scaled to a year. The models were trained on data before %s, so most of this year is data they have seen.",
-			a.Weeks, a.From.Format("2 Jan 2006"), a.To.Format("2 Jan 2006"), "19 Aug 2026"),
+		Basis: basis,
 		AnnualBillNoSystemAud:        round(a.NoSystemAUD, 2),
 		AnnualBillSelfConsumptionAud: round(a.SelfAUD+wear*a.SelfThroughputKWh, 2),
 		AnnualBillPlannerAud:         round(a.PlannerAUD+wear*a.PlannerThroughputKWh, 2),
@@ -260,11 +268,17 @@ func roundAll(v []float64, places int) []float64 {
 	return out
 }
 
-// seenNote warns when the window is data the models were trained on.
-func seenNote(start time.Time, trainedBefore string) string {
+// seen says whether a period starting at start is data the models were trained on.
+func seen(start time.Time, trainedBefore string) bool {
 	cut, err := time.ParseInLocation("2 Jan 2006", trainedBefore, start.Location())
-	if err != nil || !start.Before(cut) {
-		return ""
+	return err == nil && start.Before(cut)
+}
+
+// modelNote says how the window relates to the models' training data.
+func modelNote(start time.Time, trainedBefore string) string {
+	if seen(start, trainedBefore) {
+		return " They were trained on this period too, so the forecasts here are better than they would be on days they had not seen."
 	}
-	return " They were trained on this period too, so the forecasts here are better than they would be on days they had not seen."
+	return " For a fair test, the models are only shown periods they never saw, so they were trained once and not updated since. " +
+		"In a working system they would be retrained regularly on newer data, so forecasts this far past their training data would be more accurate."
 }

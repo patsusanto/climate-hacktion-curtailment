@@ -20,17 +20,18 @@ import (
 var NEM = time.FixedZone("NEM", 10*3600)
 
 // Windows are the named replay windows: the first and last interval of each. The models were
-// trained on data before the test window.
+// trained on data before 1 Dec 2025, so they never saw any of them.
 var Windows = map[string][2]time.Time{
-	// Summer: December 2025 to February 2026. The models were trained on it.
+	// Summer: December 2025 to February 2026, the first months after the models' training data.
 	"summer":     {time.Date(2025, 12, 1, 0, 0, 0, 0, NEM), time.Date(2026, 2, 28, 23, 55, 0, 0, NEM)},
 	"validation": {time.Date(2026, 7, 16, 0, 0, 0, 0, NEM), time.Date(2026, 8, 18, 23, 55, 0, 0, NEM)},
 	"test":       {time.Date(2026, 8, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 9, 23, 55, 0, 0, NEM)},
 }
 
-// Year is the full year the payback estimate replays: 19 Sep 2025 to 18 Sep 2026, every season.
-// The models were trained on data before 19 Aug 2026, so most of it is data they have seen.
-var Year = [2]time.Time{time.Date(2025, 9, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 18, 23, 55, 0, 0, NEM)}
+// Year is the span the payback estimate replays: 1 Dec 2025 (where the models' training data
+// ends) to 18 Sep 2026 (where the AEMO pre-dispatch data ends). It is all data the models never
+// saw; it covers summer, autumn, winter and early spring, but not October or November.
+var Year = [2]time.Time{time.Date(2025, 12, 1, 0, 0, 0, 0, NEM), time.Date(2026, 9, 18, 23, 55, 0, 0, NEM)}
 
 // Step is one market interval, in seconds.
 const Step = 300
