@@ -64,6 +64,8 @@ export interface PlaygroundTick {
   /** Self-consumption energy cost so far. Positive means that strategy has paid out. */
   cumulative_self_aud: number
   cumulative_savings_aud: number
+  /** Daily supply accrued with the steps so far. The same amount is on both bills. */
+  cumulative_supply_aud: number
 }
 
 /** Last event. savings_aud matches the last tick. Wear is only known here. */

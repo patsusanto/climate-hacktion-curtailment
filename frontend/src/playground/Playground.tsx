@@ -413,6 +413,7 @@ export default function Playground() {
             <Comparison
               selfEnergy={latest ? latest.cumulative_self_aud : null}
               savings={latest ? latest.cumulative_savings_aud : null}
+              supply={latest ? latest.cumulative_supply_aud : null}
               summary={summary}
             />
             {ticks.length > 1 && (
@@ -517,38 +518,43 @@ const scenarios: Scenario[] = [
 function Comparison({
   selfEnergy,
   savings,
+  supply,
   summary,
 }: {
   selfEnergy: number | null
   savings: number | null
+  supply: number | null
   summary: PlaygroundSummary | null
 }) {
-  const selfPaid = summary ? summary.self_consumption.bill_aud : selfEnergy
+  const supplyAud = summary?.supply_aud ?? supply
+  const selfPaid =
+    summary != null
+      ? summary.self_consumption.bill_aud
+      : selfEnergy != null
+        ? selfEnergy + (supplyAud ?? 0)
+        : null
+  const systemEnergy = selfEnergy != null && savings != null ? selfEnergy - savings : null
   const systemPaid =
     summary != null
       ? summary.planner.bill_aud
-      : selfEnergy != null && savings != null
-        ? selfEnergy - savings
+      : systemEnergy != null
+        ? systemEnergy + (supplyAud ?? 0)
         : null
-  const supply = summary ? ` Includes supply of ${money(summary.supply_aud)}.` : ''
+  const supplyLine = supplyAud != null ? ` Includes supply of ${money(supplyAud)}.` : ''
   return (
     <div className="compare">
       <PaidCard
         eyebrow="Self-consumption"
         paid={selfPaid}
         would
-        note={
-          summary
-            ? `With no battery.${supply}`
-            : 'Energy so far, with no battery.'
-        }
+        note={`With no battery.${supplyLine}`}
         bill={summary?.self_consumption}
       />
       <PaidCard
         eyebrow="With this system"
         paid={systemPaid}
         would={false}
-        note={summary ? `Instead.${supply}` : 'Energy so far.'}
+        note={`Instead.${supplyLine}`}
         bill={summary?.planner}
       />
     </div>
@@ -590,7 +596,8 @@ function paidPhrase(amount: number, would: boolean): string {
 }
 
 function paidSoFar(tick: PlaygroundTick): string {
-  const amount = tick.cumulative_self_aud - tick.cumulative_savings_aud
+  const amount =
+    tick.cumulative_self_aud - tick.cumulative_savings_aud + tick.cumulative_supply_aud
   return `With this system you ${paidPhrase(amount, false)} so far`
 }
 
