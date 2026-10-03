@@ -37,7 +37,15 @@ type Options struct {
 	// this, the battery runs self-consumption for the step instead. Forecasts are uncertain, so a
 	// small expected gain is not worth acting on. Zero turns the fallback off.
 	FallbackAUD float64
+	// Load, if set, is the site's demand (kW) on the data's clock, used instead of the household
+	// profile (which is what the trained demand model forecasts). The planner then forecasts it as
+	// the same time last week, which suits a business's weekly routine. All zeros is a site with
+	// no demand, such as a solar farm.
+	Load []float64
 }
+
+// weekSteps is one week of 5-minute steps.
+const weekSteps = 7 * daySteps
 
 // DefaultOptions are what the playground uses.
 func DefaultOptions() Options {
@@ -107,7 +115,7 @@ func Run(m *forecast.Models, in *forecast.Inputs, spec battery.Spec, start, end 
 	for k := first; k <= last; k++ {
 		t, price := in.Time(k), in.Price[k]
 		prices := opt.Tariff.At(t, price)
-		pv, load := in.PV[k]*spec.PVkWAC, in.Load[k]*loadScale
+		pv, load := in.PV[k]*spec.PVkWAC, r.load(k)
 		h := r.horizon(k)
 		plan, err := planner.Solve(soc, h, spec, opt.Curtail)
 		if err != nil {
@@ -136,6 +144,9 @@ func Run(m *forecast.Models, in *forecast.Inputs, spec battery.Spec, start, end 
 		aimed, aimedPV, aimedLoad := fc.At(k - AimSteps)
 		s := Step{Time: t, Price: price, Prices: prices, PVkW: pv, LoadkW: load, SOCBefore: soc, Planner: step, Self: self,
 			Fallback: fallback, EstPrice: aimed[0], EstPVkW: aimedPV[0] * spec.PVkWAC, EstLoadkW: aimedLoad[0] * loadScale}
+		if opt.Load != nil {
+			s.EstLoadkW = r.load(k - weekSteps)
+		}
 		s.PlannerWearAUD = opt.WearAUDPerKWh * (step.ChargeAC + step.DischargeAC)
 		s.SelfWearAUD = opt.WearAUDPerKWh * (self.ChargeAC + self.DischargeAC)
 		s.Reason = reason(s, plan, h, t, spec)
@@ -197,7 +208,12 @@ func (r *Result) paths(k int) (price, pv, load []float64) {
 		pvLeads[j] = fpv[j] * r.Spec.PVkWAC
 		loadLeads[j] = fload[j] * loadScale
 	}
-	lastPV, lastLoad := r.in.PV[k-1]*r.Spec.PVkWAC, r.in.Load[k-1]*loadScale
+	if r.Options.Load != nil { // a site's own demand: the same time last week, from the last reading
+		for j, lead := range features.Leads {
+			loadLeads[j] = r.load(k + lead - weekSteps)
+		}
+	}
+	lastPV, lastLoad := r.in.PV[k-1]*r.Spec.PVkWAC, r.load(k-1)
 	return planner.Path(r.in.Price[k], features.Leads, p50), planner.Path(lastPV, features.Leads, pvLeads), planner.Path(lastLoad, features.Leads, loadLeads)
 }
 
@@ -207,7 +223,6 @@ func (r *Result) paths(k int) (price, pv, load []float64) {
 func (r *Result) horizon(k int) planner.Horizon {
 	const block = 12 // intervals per step beyond the forecasts
 	spot, pv, load := r.paths(k)
-	loadScale := r.Spec.DailyLoadKWh / house.LoadUnitDailyKWh
 	var h planner.Horizon
 	for j := 0; j < len(spot) && j < r.Options.HorizonSteps; j++ {
 		h.Price = append(h.Price, r.Options.Tariff.At(r.in.Time(k+j), spot[j]))
@@ -223,7 +238,7 @@ func (r *Result) horizon(k int) planner.Horizon {
 			p.Import += at.Import / float64(m)
 			p.Export += at.Export / float64(m)
 			sumPV += r.in.PV[y] * r.Spec.PVkWAC
-			sumLoad += r.in.Load[y] * loadScale
+			sumLoad += r.load(y)
 		}
 		h.Price = append(h.Price, p)
 		h.PV, h.Load, h.Intervals = append(h.PV, sumPV/float64(m)), append(h.Load, sumLoad/float64(m)), append(h.Intervals, m)
@@ -267,7 +282,21 @@ func (r *Result) Detail(i int) (Detail, error) {
 			LoadLow:  math.Max(fload[j]+loadBand[0], 0) * loadScale,
 			LoadHigh: math.Max(fload[j]+loadBand[1], 0) * loadScale,
 		})
+		if r.Options.Load != nil { // last week's demand, without a range
+			l := r.load(k + lead - weekSteps)
+			last := &d.Leads[len(d.Leads)-1]
+			last.LoadkW, last.LoadLow, last.LoadHigh = l, l, l
+		}
 	}
 	d.PricePath, d.PVPath, d.LoadPath = r.paths(k)
 	return d, nil
+}
+
+// load is the site's demand (kW) in interval k: its own profile, or the household's scaled to
+// the spec's daily use.
+func (r *Result) load(k int) float64 {
+	if r.Options.Load != nil {
+		return r.Options.Load[k]
+	}
+	return r.in.Load[k] * (r.Spec.DailyLoadKWh / house.LoadUnitDailyKWh) // this order, as the scale is computed elsewhere
 }

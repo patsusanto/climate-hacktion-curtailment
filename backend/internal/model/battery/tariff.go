@@ -22,6 +22,7 @@ type Tariff struct {
 	PeakFromHour     int     // peak window, in NEM local hours [from, to)
 	PeakToHour       int
 	PeakMonths       [13]bool // months (1-12) that have a peak window
+	PeakWeekdaysOnly bool     // weekends are off-peak
 	GST              float64
 	SupplyAUDPerDay  float64 // daily network, metering and retail charges, incl. GST
 }
@@ -41,6 +42,26 @@ var Ausgrid = Tariff{
 	SupplyAUDPerDay:  1.10,
 }
 
+// AusgridBusiness is Ausgrid's small-business time-of-use network tariff (EA225) from 1 July 2026
+// under a spot pass-through retailer: peak 39.76 c/kWh from 3 to 9 pm on weekdays in summer
+// (Nov-Mar) and winter (Jun-Aug), 5.90 c/kWh otherwise, ex GST. Larger sites pay demand charges
+// (on their highest half-hour) as well; those are not modelled.
+var AusgridBusiness = Tariff{
+	Name:             "Ausgrid EA225 business time-of-use network charges + NSW1 spot",
+	PeakAUDPerKWh:    0.3976,
+	OffPeakAUDPerKWh: 0.0590,
+	PeakFromHour:     15,
+	PeakToHour:       21,
+	PeakMonths:       [13]bool{1: true, 2: true, 3: true, 6: true, 7: true, 8: true, 11: true, 12: true},
+	PeakWeekdaysOnly: true,
+	GST:              0.10,
+	SupplyAUDPerDay:  1.10,
+}
+
+// Wholesale is a generator's view: everything at the NSW1 spot price, no network charges, no
+// supply charge. A solar farm with a battery earns this.
+var Wholesale = Tariff{Name: "NSW1 spot price (wholesale)"}
+
 // SpotOnly prices imports and exports at the spot price, with no network charges or GST: the
 // tariff the models were evaluated on in training.
 var SpotOnly = Tariff{Name: "NSW1 spot only", SupplyAUDPerDay: 1.10}
@@ -49,7 +70,8 @@ var SpotOnly = Tariff{Name: "NSW1 spot only", SupplyAUDPerDay: 1.10}
 func (tf Tariff) Network(t time.Time) float64 {
 	start := t.Add(-5 * time.Minute) // the interval's own hour
 	h := start.Hour()
-	if tf.PeakMonths[int(start.Month())] && h >= tf.PeakFromHour && h < tf.PeakToHour {
+	weekend := start.Weekday() == time.Saturday || start.Weekday() == time.Sunday
+	if tf.PeakMonths[int(start.Month())] && h >= tf.PeakFromHour && h < tf.PeakToHour && !(tf.PeakWeekdaysOnly && weekend) {
 		return tf.PeakAUDPerKWh
 	}
 	return tf.OffPeakAUDPerKWh
