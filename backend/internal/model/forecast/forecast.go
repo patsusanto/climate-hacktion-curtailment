@@ -127,6 +127,12 @@ func (m *Models) TrainedBefore() string {
 type Inputs struct {
 	*data.Data
 	PV, Load []float64 // house: kW per kW of panel, kW at 15 kWh/day
+
+	// Every forecast the data allows, computed once: they do not depend on the house's sizes
+	// (solar and demand are per kW and per 15 kWh/day), so every replay of this data shares them.
+	once sync.Once
+	all  *Forecasts
+	err  error
 }
 
 // Prepare builds the house on the data's clock.
@@ -152,11 +158,17 @@ func (f *Forecasts) At(i int) (price [][3]float64, pv, load []float64) {
 }
 
 // Run forecasts at every interval in [from, to]. It needs 8 days of data before from and
-// 8 hours after to.
+// 8 hours after to. The first call for an Inputs forecasts everything the data allows, once;
+// later calls reuse it.
 func (m *Models) Run(in *Inputs, from, to int) (*Forecasts, error) {
 	if from-8*features.Day < 0 || to+96 >= in.N() || to < from {
 		return nil, fmt.Errorf("fetch a wider window: the model needs 8 days before and 8 hours after the times asked for")
 	}
+	in.once.Do(func() { in.all, in.err = m.run(in, 8*features.Day, in.N()-97) })
+	return in.all, in.err
+}
+
+func (m *Models) run(in *Inputs, from, to int) (*Forecasts, error) {
 	n := to - from + 1
 	f := &Forecasts{From: from, To: to, Price: make([][][3]float64, n), PV: make([][]float64, n), Load: make([][]float64, n)}
 	for k := range f.Price {

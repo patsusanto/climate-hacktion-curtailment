@@ -48,7 +48,7 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 		load        = fs.Float64("load", 15, "daily load, kWh")
 		exportCap   = fs.Float64("export-cap", 5, "export cap, kW")
 		detailEvery = fs.Int("detail-every", 12, "keep forecast detail for every Nth step")
-		wear        = fs.Float64("wear", 0.05, "battery wear, AUD per kWh, for savings_with_wear_aud")
+		wear        = fs.Float64("wear", 0.05, "battery wear, AUD per kWh moved: the planner weighs cycling against it, and the bills include it")
 		noPD        = fs.Bool("no-predispatch", false, "skip AEMO pre-dispatch (~125 MB a week); the price model is less accurate without it")
 		curtail     = fs.String("curtail", string(planner.Economic), `"economic" or "forced_only" (never clip solar by choice)`)
 	)
@@ -91,18 +91,42 @@ func run(args []string, stdout io.Writer, logger *log.Logger) error {
 	logger.Printf("loaded the data and models in %s", time.Since(t0).Round(time.Millisecond))
 
 	t1 := time.Now()
-	res, err := simulate.Run(models, in, spec, start, end, planner.Curtail(*curtail), nil)
+	opt := simulate.DefaultOptions()
+	opt.Curtail = planner.Curtail(*curtail)
+	opt.WearAUDPerKWh = *wear
+	res, err := simulate.Run(models, in, spec, start, end, opt, nil)
 	if err != nil {
 		return err
 	}
 	logger.Printf("replayed %d steps in %s", len(res.Steps), time.Since(t1).Round(time.Millisecond))
+
+	// The payback figures need a year of data: data/year, built once (see the README).
+	if yearDir := filepath.Join(*dataDir, "year"); data.Exists(filepath.Join(yearDir, "prices.csv")) {
+		t2 := time.Now()
+		yd, err := data.Load(yearDir)
+		if err != nil {
+			return err
+		}
+		year, err := models.Prepare(yd)
+		if err != nil {
+			return err
+		}
+		a, err := simulate.RunAnnual(models, year, spec, data.Year[0], data.Year[1], simulate.AnnualWeeks, opt)
+		if err != nil {
+			return err
+		}
+		res.Annual = &a
+		logger.Printf("replayed %d weeks of the year for the payback in %s", a.Weeks, time.Since(t2).Round(time.Millisecond))
+	} else {
+		logger.Printf("no data in %s: the run has no payback figures", yearDir)
+	}
 
 	id := *runID
 	if id == "" {
 		id = defaultID(*pv, *batteryKwh)
 	}
 	file, err := runfile.Build(res, runfile.Options{ID: id, WindowName: *window, DetailEvery: *detailEvery,
-		WearAUDPerKWh: *wear, TrainedBefore: models.TrainedBefore()})
+		TrainedBefore: models.TrainedBefore()})
 	if err != nil {
 		return err
 	}
@@ -129,7 +153,7 @@ func complete(dir string, skipPredispatch bool) bool {
 		if skipPredispatch && f == "predispatch.csv" {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+		if !data.Exists(filepath.Join(dir, f)) {
 			return false
 		}
 	}

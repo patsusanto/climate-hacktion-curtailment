@@ -21,12 +21,14 @@ export interface PlaygroundMeta {
   assumptions: {
     price_region: 'NSW1'
     price_source: 'historical_spot'
-    roof: 'synthetic_clear_sky_scaled_by_pv_kw_ac'
+    roof: string
     load: 'evening_peak_synthetic'
     address_label: string
     lat: number
     lon: number
     note: string
+    /** How the bills are priced, in one sentence. */
+    tariff?: string
   }
   spec: {
     pv_kw_ac: number
@@ -35,7 +37,8 @@ export interface PlaygroundMeta {
     battery_kw: number
     usable_kwh: number
     daily_load_kwh: number
-    degradation_aud_per_kwh: 0
+    /** What the planner counts battery wear at, $/kWh moved. Not on the bill. */
+    degradation_aud_per_kwh: number
   }
   window: { start: string; end: string; step_minutes: 5; n: number }
 }
@@ -64,6 +67,11 @@ export interface PlaygroundTick {
   /** Self-consumption energy cost so far. Positive means that strategy has paid out. */
   cumulative_self_aud: number
   cumulative_savings_aud: number
+  /** What one kWh cost to import and earned exported this step, $/kWh with the tariff applied. */
+  import_aud_kwh?: number
+  export_aud_kwh?: number
+  /** Why the battery did what it did, in plain words. */
+  reason?: string
 }
 
 /** Last event. savings_aud matches the last tick. Wear is only known here. */
@@ -73,6 +81,29 @@ export interface PlaygroundSummary {
   savings_aud: number
   savings_with_wear_aud: number
   supply_aud: number
+  /** Things to know about this result, e.g. the planner did worse than self-consumption. */
+  warnings?: string[]
+  /** A year of bills and the system's cost, for the payback figures. */
+  payback?: Payback
+}
+
+/** All amounts AUD incl. GST, for a year. */
+export interface Payback {
+  basis: string
+  annual_bill_no_system_aud: number
+  annual_bill_self_consumption_aud: number
+  annual_bill_planner_aud: number
+  annual_wear_self_consumption_aud: number
+  annual_wear_planner_aud: number
+  wear_aud_per_kwh: number
+  solar_aud_per_kw: number
+  battery_aud_per_kwh: number
+  battery_rebate_aud: number
+  system_cost_aud: number
+  cost_sources: string
+  /** 0 when the savings never repay the cost. */
+  payback_years_self_consumption: number
+  payback_years_planner: number
 }
 
 export interface Bill {
@@ -82,6 +113,8 @@ export interface Bill {
   throughput_ac_kwh: number
   grid_import_kwh: number
   grid_export_kwh: number
+  /** Battery wear at the run's rate; bill_aud includes it. */
+  wear_aud?: number
 }
 
 /** GET /v1/playground/run/{id}/steps/{i} — not streamed. */

@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { fetchStep, streamPlayground } from './api'
 import Chart from './Chart'
 import Decision from './Decision'
+import Payback from './Payback'
 import { Mascot } from '../mascot/Mascot'
 import { kwh, money } from './format'
 import type {
@@ -415,6 +416,13 @@ export default function Playground() {
               savings={latest ? latest.cumulative_savings_aud : null}
               summary={summary}
             />
+            {summary?.warnings && summary.warnings.length > 0 && (
+              <div className="warnings" role="note">
+                {summary.warnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
+            )}
             {ticks.length > 1 && (
               <div className="scrub-row">
                 <label className="scrub">
@@ -462,7 +470,9 @@ export default function Playground() {
               />
             )}
           </div>
+          {summary?.payback && <Payback payback={summary.payback} spec={meta.spec} />}
           <p className="note assumptions">{meta.assumptions.note}</p>
+          {meta.assumptions.tariff && <p className="note assumptions">{meta.assumptions.tariff}</p>}
           {status === 'stopped' && (
             <p className="note">Stopped. These are the steps that had arrived.</p>
           )}
@@ -530,7 +540,9 @@ function Comparison({
       : selfEnergy != null && savings != null
         ? selfEnergy - savings
         : null
-  const supply = summary ? ` Includes supply of ${money(summary.supply_aud)}.` : ''
+  const supply = summary
+    ? ` Includes supply of ${money(summary.supply_aud)}${summary.planner.wear_aud != null ? ' and battery wear' : ''}.`
+    : ''
   return (
     <div className="compare">
       <PaidCard
@@ -539,8 +551,8 @@ function Comparison({
         would
         note={
           summary
-            ? `With no battery.${supply}`
-            : 'Energy so far, with no battery.'
+            ? `Battery on its default setting: stores spare solar, runs the house at night.${supply}`
+            : 'Energy so far, battery on its default setting.'
         }
         bill={summary?.self_consumption}
       />
@@ -617,6 +629,12 @@ function BillFacts({
         <dt>Battery throughput</dt>
         <dd>{kwh(bill.throughput_ac_kwh)}</dd>
       </div>
+      {bill.wear_aud != null && (
+        <div>
+          <dt>Battery wear</dt>
+          <dd>{money(bill.wear_aud)}</dd>
+        </div>
+      )}
     </dl>
   )
 }

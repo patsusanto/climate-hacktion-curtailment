@@ -2,8 +2,12 @@
 package data
 
 import (
+	"compress/gzip"
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,6 +25,10 @@ var Windows = map[string][2]time.Time{
 	"validation": {time.Date(2026, 7, 16, 0, 0, 0, 0, NEM), time.Date(2026, 8, 18, 23, 55, 0, 0, NEM)},
 	"test":       {time.Date(2026, 8, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 9, 23, 55, 0, 0, NEM)},
 }
+
+// Year is the full year the payback estimate replays: 19 Sep 2025 to 18 Sep 2026, every season.
+// The models were trained on data before 19 Aug 2026, so most of it is data they have seen.
+var Year = [2]time.Time{time.Date(2025, 9, 19, 0, 0, 0, 0, NEM), time.Date(2026, 9, 18, 23, 55, 0, 0, NEM)}
 
 // Step is one market interval, in seconds.
 const Step = 300
@@ -122,7 +130,7 @@ func Load(dir string) (*Data, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, "predispatch.csv")
-	if _, err := os.Stat(path); err == nil {
+	if Exists(path) {
 		if d.PD, err = readPredispatch(path); err != nil {
 			return nil, err
 		}
@@ -135,13 +143,25 @@ type table struct {
 	rows [][]string
 }
 
+// readCSV reads path, or path.gz if only the gzipped file is there.
 func readCSV(path string) (*table, error) {
 	f, err := os.Open(path)
+	var r io.Reader = f
+	if errors.Is(err, fs.ErrNotExist) {
+		if f, err = os.Open(path + ".gz"); err == nil {
+			gz, gzErr := gzip.NewReader(f)
+			if gzErr != nil {
+				f.Close()
+				return nil, fmt.Errorf("%s.gz: %w", path, gzErr)
+			}
+			r = gz
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	records, err := csv.NewReader(f).ReadAll()
+	records, err := csv.NewReader(r).ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -248,4 +268,14 @@ func readPredispatch(path string) (*Predispatch, error) {
 		s.Published[i], s.End[i], s.RRP[i], s.Demand[i] = p.Published[j], p.End[j], p.RRP[j], p.Demand[j]
 	}
 	return s, nil
+}
+
+// Exists says whether a data file is there, plain or gzipped (path.gz).
+func Exists(path string) bool {
+	for _, p := range []string{path, path + ".gz"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
 }
