@@ -1,0 +1,49 @@
+# Builds the model worker and deploys it to Cloud Run as a private service.
+# Run from the repo root by a Cloud Build trigger; steps use dir: backend.
+#
+# The window data (backend/data/<window>/*.csv, as written by cmd/genrun) is committed to the
+# repo and baked into the image, so there is nothing else to set up. See README.md,
+# "Deploy the model worker".
+substitutions:
+  _REGION: europe-west1
+  _SERVICE: worker
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/${_SERVICE}:${COMMIT_SHA}
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    dir: backend
+    env: ['DOCKER_BUILDKIT=1'] # for Dockerfile.worker.dockerignore
+    args: ['build', '-f', 'Dockerfile.worker', '-t', '${_IMAGE}', '.']
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ['push', '${_IMAGE}']
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}
+      - --region=${_REGION}
+      # Private: only services granted roles/run.invoker (the public backend) can call it
+      - --no-allow-unauthenticated
+      # A run is CPU-bound, so few at a time per instance; more instances scale it out
+      - --cpu=2
+      # Measured: about 50 MB idle and under 100 MB after several runs, so 1 GiB is ample
+      - --memory=1Gi
+      - --concurrency=2
+      - --max-instances=3
+      - --timeout=900
+      # Extra CPU while the instance starts (it parses the window data), to shorten cold starts
+      - --cpu-boost
+      - --set-env-vars=DATA_DIR=/data,STREAM_SECONDS=25,MAX_RUNS=2
+
+options:
+  # Lets _IMAGE reference the other substitutions
+  dynamic_substitutions: true
+  # Required when the trigger uses a user-specified service account
+  logging: CLOUD_LOGGING_ONLY
