@@ -12,15 +12,12 @@ const IntervalHours = 5.0 / 60.0
 
 const tol = 1e-9
 
-// SupplyAUDPerDay is the daily supply charge (100 c/day plus GST).
-const SupplyAUDPerDay = 1.10
-
 // Spec is the house: roof, export limit, battery and demand.
 type Spec struct {
 	PVkWAC         float64 // inverter AC rating; the PV forecast is per kW of it
 	ExportCapKW    float64
 	DailyLoadKWh   float64
-	WearAUDPerKWh  float64 // battery wear per kWh of AC throughput
+	WearAUDPerKWh  float64 // battery wear per kWh of AC throughput: what the planner weighs cycling against; not on the bill
 	CapacityKWh    float64
 	MaxPowerKW     float64
 	RoundTripEff   float64
@@ -134,80 +131,128 @@ func Apply(soc float64, action Action, pvKW, loadKW float64, spec Spec) (Step, e
 	return s, check(s, spec, load)
 }
 
-// Flows is a planned interval (kWh), as the planner chose it.
+// Flows is one interval's energy routing (kWh).
 type Flows struct {
 	PVToLoad, PVToBattery, PVToExport, PVClipped float64
 	GridToLoad, GridToBattery                    float64
 	BatteryToLoad, BatteryToExport               float64
 }
 
-// ApplyFlows settles one interval from a plan.
+// Clip is how solar may be clipped.
+type Clip string
+
+const (
+	// ClipEconomic clips solar whenever exporting it would cost money.
+	ClipEconomic Clip = "economic"
+	// ClipForcedOnly clips only what the export cap forces.
+	ClipForcedOnly Clip = "forced_only"
+)
+
+// GridNet is the best net grid energy (import positive, kWh) for an interval when the battery
+// moves b kWh (AC, + charge), and what it costs. Solar can be clipped, so the net can be anything
+// from load+b-pv (use all the solar) up to load+b (clip it all), but never below -cap.
+func GridNet(b, pv, load, cap float64, p Prices, clip Clip) (net, cost float64) {
+	lo, hi := math.Max(load+b-pv, -cap), load+b
+	switch {
+	case clip == ClipForcedOnly || lo >= hi:
+		net = lo
+	case p.Import < 0: // paid to import: clip everything
+		net = hi
+	case p.Export < 0: // exporting costs: clip down to zero export
+		net = math.Min(math.Max(0, lo), hi)
+	default:
+		net = lo
+	}
+	if net >= 0 {
+		return net, p.Import * net
+	}
+	return net, p.Export * net
+}
+
+// Route spells out an interval's flows when the battery moves b kWh (AC, + charge) and the grid
+// net is net (from GridNet). Solar goes to the house first, then the battery, then export.
+func Route(b, net, pv, load float64) Flows {
+	used := math.Min(math.Max(load+b-net, 0), pv) // solar not clipped
+	var f Flows
+	f.PVClipped = pv - used
+	f.PVToLoad = math.Min(used, load)
+	rest := used - f.PVToLoad
+	if b >= 0 {
+		f.PVToBattery = math.Min(b, rest)
+		f.GridToBattery = b - f.PVToBattery
+		f.PVToExport = rest - f.PVToBattery
+		f.GridToLoad = load - f.PVToLoad
+		return f
+	}
+	d := -b
+	f.BatteryToLoad = math.Min(d, load-f.PVToLoad)
+	f.BatteryToExport = d - f.BatteryToLoad
+	f.PVToExport = rest
+	f.GridToLoad = load - f.PVToLoad - f.BatteryToLoad
+	return f
+}
+
+// Settle carries out one interval of a plan against what the interval actually brought.
 //
-// The plan is read as intent, not copied: the battery's net AC power (charge minus discharge,
-// so a plan that does both nets out), whether it meant to buy from the grid to charge, and its
-// total export (PV plus battery). These are fitted to the measured PV and load, the battery's
-// power and SOC limits and the export cap. PV is clipped only where the plan exported less than
-// it could, which it chooses at a negative price, or where the cap and battery force it.
-func ApplyFlows(soc float64, f Flows, pvKW, loadKW float64, spec Spec) (Step, error) {
+// The battery follows the plan's net power (charge minus discharge), within its limits. It buys
+// from the grid to charge only if the plan meant to, and sends stored energy to the grid only if
+// the plan meant to; otherwise it charges from spare solar and discharges into the house. Solar
+// is then clipped or exported by the interval's actual prices, as an inverter on a spot plan does,
+// and any solar that would be clipped goes into the battery if it has room.
+func Settle(soc float64, plan Flows, pvKW, loadKW float64, p Prices, spec Spec, clip Clip) (Step, error) {
 	leg := spec.Leg()
 	pv := math.Max(pvKW, 0) * IntervalHours
 	load := math.Max(loadKW, 0) * IntervalHours
 	cap := spec.ExportCapKW * IntervalHours
 	maxAC := spec.MaxPowerKW * IntervalHours
-	chargeRoom := math.Min(maxAC, math.Max(0, (spec.SOCMax()-soc)/leg))
-	dischargeRoom := math.Min(maxAC, math.Max(0, (soc-spec.SOCMin())*leg))
-
-	pvToLoad := math.Min(pv, load)
-	residual := pv - pvToLoad
-	unmet := load - pvToLoad
-
-	plannedCharge := math.Max(f.PVToBattery, 0) + math.Max(f.GridToBattery, 0)
-	plannedDischarge := math.Max(f.BatteryToLoad, 0) + math.Max(f.BatteryToExport, 0)
-	net := plannedCharge - plannedDischarge
-	exportTarget := math.Max(f.PVToExport, 0) + math.Max(f.BatteryToExport, 0)
-	gridChargeOK := f.GridToBattery > tol
-
-	var pvToBattery, gridToBattery, batteryToLoad, batteryToExport float64
-	if net > tol {
-		charge := math.Min(net, chargeRoom)
-		pvToBattery = math.Min(charge, residual)
-		if gridChargeOK {
-			gridToBattery = charge - pvToBattery
+	b := plan.PVToBattery + plan.GridToBattery - plan.BatteryToLoad - plan.BatteryToExport
+	switch {
+	case b > tol:
+		b = math.Min(b, math.Min(maxAC, math.Max(0, (spec.SOCMax()-soc)/leg)))
+		if plan.GridToBattery <= tol {
+			b = math.Min(b, math.Max(pv-load, 0))
 		}
-	} else if net < -tol {
-		discharge := math.Min(-net, dischargeRoom)
-		batteryToLoad = math.Min(discharge, unmet)
-		batteryToExport = math.Min(discharge-batteryToLoad, cap)
+	case b < -tol:
+		b = -math.Min(-b, math.Min(maxAC, math.Max(0, (soc-spec.SOCMin())*leg)))
+		if plan.BatteryToExport <= tol {
+			b = -math.Min(-b, math.Max(load-pv, 0))
+		}
+		b = -math.Min(-b, load+cap) // what the house and the export cap can take
+	default:
+		b = 0
 	}
-	pvRoom := residual - pvToBattery
-	pvToExport := math.Min(pvRoom, math.Min(math.Max(cap-batteryToExport, 0), math.Max(exportTarget-batteryToExport, 0)))
-	gridToLoad := unmet - batteryToLoad
-	if gridToBattery > tol && pvToExport > tol { // store the PV rather than export it and buy
-		move := math.Min(gridToBattery, pvToExport)
-		gridToBattery -= move
-		pvToBattery += move
-		pvToExport -= move
+	net, _ := GridNet(b, pv, load, cap, p, clip)
+	f := Route(b, net, pv, load)
+	// Solar that would be clipped is free energy: store what the battery has room for, whatever
+	// the plan said (its solar forecast may simply have been low).
+	if room := math.Min(maxAC, math.Max(0, (spec.SOCMax()-soc)/leg)) - b; f.PVClipped > tol && b >= 0 && room > tol {
+		b += math.Min(f.PVClipped, room)
+		net, _ = GridNet(b, pv, load, cap, p, clip)
+		f = Route(b, net, pv, load)
 	}
-	if gridToLoad+gridToBattery > tol && pvToExport+batteryToExport > tol {
-		pvToExport, batteryToExport = 0, 0
+	if f.GridToBattery > tol && f.PVToExport > tol { // never buy to charge while exporting solar
+		move := math.Min(f.GridToBattery, f.PVToExport)
+		f.GridToBattery -= move
+		f.PVToBattery += move
+		f.PVToExport -= move
 	}
-	chargeAC := pvToBattery + gridToBattery
-	dischargeAC := batteryToLoad + batteryToExport
+	chargeAC := f.PVToBattery + f.GridToBattery
+	dischargeAC := f.BatteryToLoad + f.BatteryToExport
 	action, newSOC := Hold, soc
 	if chargeAC > tol {
 		action, newSOC = ChargeSurplus, soc+chargeAC*leg
-		if gridToBattery > tol {
+		if f.GridToBattery > tol {
 			action = Charge
 		}
 	} else if dischargeAC > tol {
 		action, newSOC = DischargeLoad, soc-dischargeAC/leg
-		if batteryToExport > tol {
+		if f.BatteryToExport > tol {
 			action = Discharge
 		}
 	}
-	s := Step{Action: action, SOC: math.Min(math.Max(newSOC, spec.SOCMin()), spec.SOCMax()), PVAvail: pv, PVToLoad: pvToLoad,
-		PVToBattery: pvToBattery, PVToExport: pvToExport, Clipped: pv - pvToLoad - pvToBattery - pvToExport,
-		GridImport: gridToLoad + gridToBattery, GridExport: pvToExport + batteryToExport, ChargeAC: chargeAC, DischargeAC: dischargeAC}
+	s := Step{Action: action, SOC: math.Min(math.Max(newSOC, spec.SOCMin()), spec.SOCMax()), PVAvail: pv, PVToLoad: f.PVToLoad,
+		PVToBattery: f.PVToBattery, PVToExport: f.PVToExport, Clipped: f.PVClipped,
+		GridImport: f.GridToLoad + f.GridToBattery, GridExport: f.PVToExport + f.BatteryToExport, ChargeAC: chargeAC, DischargeAC: dischargeAC}
 	return s, check(s, spec, load)
 }
 
@@ -234,9 +279,9 @@ func check(s Step, spec Spec, load float64) error {
 	return nil
 }
 
-// Cash is the interval's spot energy cost in $ (negative: the house was paid).
-func (s Step) Cash(priceAUDMWh float64) float64 {
-	return (s.GridImport - s.GridExport) * priceAUDMWh / 1000
+// Cash is the interval's energy cost in $ at its prices (negative: the house was paid).
+func (s Step) Cash(p Prices) float64 {
+	return s.GridImport*p.Import - s.GridExport*p.Export
 }
 
 // Bill is the total over a run.
@@ -245,24 +290,29 @@ type Bill struct {
 	PVAvail, PVToLoad, PVToBattery, PVToExport float64
 	Clipped, GridImport, GridExport            float64
 	ChargeAC, DischargeAC                      float64
+	Days                                       int
 }
 
 // Throughput is the battery's AC charge plus discharge (kWh).
 func (b Bill) Throughput() float64 { return b.ChargeAC + b.DischargeAC }
 
-// Meter adds up settled intervals into a bill: spot energy, the daily supply charge, and wear.
+// SupplyAUD is the daily charges over the run.
+func (b Bill) SupplyAUD() float64 { return b.BillAUD - b.EnergyCashAUD }
+
+// Meter adds up settled intervals into a bill: energy at the tariff's prices plus its daily
+// supply charge. Battery wear is not on the bill; it is reported separately.
 type Meter struct {
-	spec Spec
-	bill Bill
-	days map[string]bool
+	tariff Tariff
+	bill   Bill
+	days   map[string]bool
 }
 
-func NewMeter(spec Spec) *Meter { return &Meter{spec: spec, days: map[string]bool{}} }
+func NewMeter(tf Tariff) *Meter { return &Meter{tariff: tf, days: map[string]bool{}} }
 
 // Record adds the interval ending at t.
-func (m *Meter) Record(t time.Time, s Step, priceAUDMWh float64) {
+func (m *Meter) Record(t time.Time, s Step, p Prices) {
 	b := &m.bill
-	b.EnergyCashAUD += s.Cash(priceAUDMWh)
+	b.EnergyCashAUD += s.Cash(p)
 	b.PVAvail += s.PVAvail
 	b.PVToLoad += s.PVToLoad
 	b.PVToBattery += s.PVToBattery
@@ -278,6 +328,7 @@ func (m *Meter) Record(t time.Time, s Step, priceAUDMWh float64) {
 // Finish returns the bill so far.
 func (m *Meter) Finish() Bill {
 	b := m.bill
-	b.BillAUD = b.EnergyCashAUD + float64(len(m.days))*SupplyAUDPerDay + b.Throughput()*m.spec.WearAUDPerKWh
+	b.Days = len(m.days)
+	b.BillAUD = b.EnergyCashAUD + float64(b.Days)*m.tariff.SupplyAUDPerDay
 	return b
 }

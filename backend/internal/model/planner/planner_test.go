@@ -40,14 +40,34 @@ func TestMatchesLP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, cost, err := solve(c.SOC, c.Price, c.PV, c.Load, spec, c.Curtail)
+		plan, err := Solve(c.SOC, spotOnly(c.Price, c.PV, c.Load), spec, c.Curtail)
 		if err != nil {
 			t.Fatal(err)
 		}
+		cost := plan.Cost
 		if math.Abs(cost-c.LPCost) > 1e-6*math.Max(1, math.Abs(c.LPCost)) {
 			t.Errorf("case %d (%s): DP cost %.8f, LP cost %.8f", i, c.Curtail, cost, c.LPCost)
 		}
 	}
+}
+
+// spotOnly is a horizon priced at the spot price both ways ($/MWh in), as in the training LP.
+func spotOnly(price, pv, load []float64) Horizon {
+	h := Horizon{PV: pv, Load: load}
+	for _, p := range price {
+		h.Price = append(h.Price, battery.Prices{Import: p / 1000, Export: p / 1000})
+	}
+	return h
+}
+
+// first is the first step of the plan for a spot-only horizon.
+func first(t *testing.T, soc float64, price, pv, load []float64, spec battery.Spec, curtail Curtail) battery.Flows {
+	t.Helper()
+	plan, err := Solve(soc, spotOnly(price, pv, load), spec, curtail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan.First
 }
 
 func flat(n int, v float64) []float64 {
@@ -62,21 +82,21 @@ func TestDecisions(t *testing.T) {
 	spec, _ := battery.NewSpec(6.6, 10, 5, 5, 15, 0)
 	mid := (spec.SOCMin() + spec.SOCMax()) / 2
 	cheapThenDear := append(flat(2, 20), flat(94, 400)...) // too short to fill later
-	f, _ := Plan(mid, cheapThenDear, flat(96, 0), flat(96, 0.5), spec, Economic)
+	f := first(t, mid, cheapThenDear, flat(96, 0), flat(96, 0.5), spec, Economic)
 	if f.GridToBattery <= 0 {
 		t.Errorf("should buy to charge before a price rise: %+v", f)
 	}
 	dearThenCheap := append(flat(2, 400), flat(94, 20)...)
-	f, _ = Plan(mid, dearThenCheap, flat(96, 0), flat(96, 0.5), spec, Economic)
+	f = first(t, mid, dearThenCheap, flat(96, 0), flat(96, 0.5), spec, Economic)
 	if f.BatteryToLoad+f.BatteryToExport <= 0 {
 		t.Errorf("should discharge before a price fall: %+v", f)
 	}
 	negative := flat(96, -50)
-	f, _ = Plan(mid, negative, flat(96, 4), flat(96, 0.5), spec, Economic)
+	f = first(t, mid, negative, flat(96, 4), flat(96, 0.5), spec, Economic)
 	if f.BatteryToLoad+f.BatteryToExport > 0 || f.PVToExport > 0 {
 		t.Errorf("at a negative price: no discharge, no export: %+v", f)
 	}
-	f, _ = Plan(mid, negative, flat(96, 4), flat(96, 0.5), spec, ForcedOnly)
+	f = first(t, mid, negative, flat(96, 4), flat(96, 0.5), spec, ForcedOnly)
 	if f.PVClipped > 1e-9 && f.PVToExport < spec.ExportCapKW*battery.IntervalHours-1e-9 {
 		t.Errorf("forced_only clips only what the cap and battery force: %+v", f)
 	}

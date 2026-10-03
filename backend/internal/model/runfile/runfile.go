@@ -16,6 +16,7 @@ import (
 
 	"climate-hacktion-curtailment/backend/internal/model/battery"
 	"climate-hacktion-curtailment/backend/internal/model/house"
+	"climate-hacktion-curtailment/backend/internal/model/payback"
 	"climate-hacktion-curtailment/backend/internal/model/simulate"
 	"climate-hacktion-curtailment/backend/internal/wire"
 )
@@ -25,13 +26,12 @@ type Options struct {
 	ID            string
 	WindowName    string  // "validation" or "test"
 	DetailEvery   int     // keep the forecast detail for every Nth step (the file grows ~3 KB per kept step)
-	WearAUDPerKWh float64 // for savings_with_wear_aud
 	TrainedBefore string  // shown in the note, e.g. "19 Aug 2026"
 }
 
 // Meta is the run's metadata, which a live run sends before the first step. start and end are
 // the first and last intervals of the window, and n the number of 5-minute steps between them.
-func Meta(spec battery.Spec, start, end time.Time, n int, opt Options) wire.Meta {
+func Meta(spec battery.Spec, sim simulate.Options, start, end time.Time, n int, opt Options) wire.Meta {
 	return wire.Meta{
 		Assumptions: wire.Assumptions{
 			PriceRegion: "NSW1",
@@ -42,6 +42,7 @@ func Meta(spec battery.Spec, start, end time.Time, n int, opt Options) wire.Meta
 			Lon:         house.Lon,
 			Note: "The house runs on Sydney's observed weather and NSW1 spot prices whatever the address. " +
 				"Prices and solar are forecast by models trained on data before " + opt.TrainedBefore + ".",
+			Tariff: sim.Tariff.Describe(),
 		},
 		Spec: wire.Spec{
 			PvKwAc:               spec.PVkWAC,
@@ -50,7 +51,7 @@ func Meta(spec battery.Spec, start, end time.Time, n int, opt Options) wire.Meta
 			BatteryKw:            spec.MaxPowerKW,
 			UsableKwh:            round(spec.Usable(), 4),
 			DailyLoadKwh:         spec.DailyLoadKWh,
-			DegradationAudPerKwh: spec.WearAUDPerKWh,
+			DegradationAudPerKwh: sim.WearAUDPerKWh,
 		},
 		Window: wire.Window{
 			Start:       stamp(start),
@@ -61,14 +62,15 @@ func Meta(spec battery.Spec, start, end time.Time, n int, opt Options) wire.Meta
 	}
 }
 
-// Ticker turns settled steps into ticks, in order, keeping the running cost of each strategy.
+// Ticker turns settled steps into ticks, in order, keeping the running cost of each strategy:
+// energy plus battery wear, so the two compare like for like.
 type Ticker struct{ cumSelf, cumPlanner float64 }
 
 // Tick is step i's tick.
 func (t *Ticker) Tick(i int, s simulate.Step) wire.Tick {
-	cash := s.Planner.Cash(s.Price)
-	t.cumPlanner += cash
-	t.cumSelf += s.Self.Cash(s.Price)
+	cash := s.Planner.Cash(s.Prices)
+	t.cumPlanner += cash + s.PlannerWearAUD
+	t.cumSelf += s.Self.Cash(s.Prices) + s.SelfWearAUD
 	return wire.Tick{
 		I:                    i,
 		T:                    stamp(s.Time),
@@ -87,6 +89,9 @@ func (t *Ticker) Tick(i int, s simulate.Step) wire.Tick {
 		EnergyCashAud:        round(cash, 5),
 		CumulativeSelfAud:    round(t.cumSelf, 4),
 		CumulativeSavingsAud: round(t.cumSelf-t.cumPlanner, 4),
+		ImportAudKwh:         round(s.Prices.Import, 4),
+		ExportAudKwh:         round(s.Prices.Export, 4),
+		Reason:               s.Reason,
 	}
 }
 
@@ -106,7 +111,7 @@ func StepDecision(res *simulate.Result, i int) (wire.StepDecision, error) {
 			LoadKw:      round(d.LoadPath[0], 4),
 			SocKwh:      round(s.SOCBefore, 4),
 		},
-		EnergyCashAud: round(s.Planner.Cash(s.Price), 5),
+		EnergyCashAud: round(s.Planner.Cash(s.Prices), 5),
 		Stories: []wire.Story{{
 			ID: "mid", Count: 1,
 			PriceAudMwh: roundAll(d.PricePath, 2),
@@ -125,18 +130,61 @@ func StepDecision(res *simulate.Result, i int) (wire.StepDecision, error) {
 	return decision, nil
 }
 
-// Summary is the last event of a run: both bills and the savings.
+// Summary is the last event of a run: both bills, the savings, warnings and the payback. Each
+// bill includes battery wear at the run's rate, so the savings compare like for like.
 func Summary(res *simulate.Result, opt Options) wire.Summary {
+	wear := res.Options.WearAUDPerKWh
 	p, sc := res.Planner, res.Self
-	return wire.Summary{
-		SelfConsumption: bill(sc.BillAUD, sc.EnergyCashAUD, sc.Clipped, sc.Throughput(), sc.GridImport, sc.GridExport),
-		Planner:         bill(p.BillAUD, p.EnergyCashAUD, p.Clipped, p.Throughput(), p.GridImport, p.GridExport),
-		SavingsAud:      round(sc.BillAUD-p.BillAUD, 4),
-		SavingsWithWearAud: round((sc.BillAUD+opt.WearAUDPerKWh*sc.Throughput())-
-			(p.BillAUD+opt.WearAUDPerKWh*p.Throughput()), 4),
-		SupplyAud: round(p.BillAUD-p.EnergyCashAUD-p.Throughput()*res.Spec.WearAUDPerKWh, 4),
+	saved := (sc.BillAUD + wear*sc.Throughput()) - (p.BillAUD + wear*p.Throughput())
+	out := wire.Summary{
+		SelfConsumption:    bill(sc, wear),
+		Planner:            bill(p, wear),
+		SavingsAud:         round(saved, 4),
+		SavingsWithWearAud: round(saved, 4),
+		SupplyAud:          round(p.SupplyAUD(), 4),
+	}
+	if saved < 0 {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("For this house, the battery's own self-consumption mode did better than the planner "+
+			"over this window, by %s once battery wear is counted. Planning has little to work with when the house "+
+			"can't export or the battery is small for its solar and demand.", dollars(-saved)))
+	}
+	if res.Annual != nil {
+		pb := Payback(res.Spec, *res.Annual, wear)
+		out.Payback = &pb
+		const warranty = 10 // years; the usual battery warranty
+		switch {
+		case pb.PaybackYearsPlanner == 0:
+			out.Warnings = append(out.Warnings, "At these prices the system's savings never repay what it costs.")
+		case pb.PaybackYearsPlanner > warranty:
+			out.Warnings = append(out.Warnings, fmt.Sprintf("Payback takes %.1f years, longer than the usual 10-year battery warranty.", pb.PaybackYearsPlanner))
+		}
+	}
+	return out
+}
+
+// Payback is the year of bills and what the system costs.
+func Payback(spec battery.Spec, a simulate.Annual, wear float64) wire.Payback {
+	cost, rebate := payback.Cost(spec.PVkWAC, spec.CapacityKWh)
+	return wire.Payback{
+		Basis: fmt.Sprintf("%d weeks spread over %s - %s, scaled to a year. The models were trained on data before %s, so most of this year is data they have seen.",
+			a.Weeks, a.From.Format("2 Jan 2006"), a.To.Format("2 Jan 2006"), "19 Aug 2026"),
+		AnnualBillNoSystemAud:        round(a.NoSystemAUD, 2),
+		AnnualBillSelfConsumptionAud: round(a.SelfAUD+wear*a.SelfThroughputKWh, 2),
+		AnnualBillPlannerAud:         round(a.PlannerAUD+wear*a.PlannerThroughputKWh, 2),
+		AnnualWearSelfConsumptionAud: round(wear*a.SelfThroughputKWh, 2),
+		AnnualWearPlannerAud:         round(wear*a.PlannerThroughputKWh, 2),
+		WearAudPerKwh:                wear,
+		SolarAudPerKw:                payback.SolarAUDPerKW,
+		BatteryAudPerKwh:             payback.BatteryAUDPerKWh,
+		BatteryRebateAud:             round(rebate, 2),
+		SystemCostAud:                round(cost, 2),
+		CostSources:                  payback.Sources,
+		PaybackYearsSelfConsumption:  round(payback.Years(cost, a.NoSystemAUD-a.SelfAUD-wear*a.SelfThroughputKWh), 2),
+		PaybackYearsPlanner:          round(payback.Years(cost, a.NoSystemAUD-a.PlannerAUD-wear*a.PlannerThroughputKWh), 2),
 	}
 }
+
+func dollars(v float64) string { return fmt.Sprintf("$%.2f", v) }
 
 // Build packages a finished replay.
 func Build(res *simulate.Result, opt Options) (wire.RunFile, error) {
@@ -150,7 +198,7 @@ func Build(res *simulate.Result, opt Options) (wire.RunFile, error) {
 	run := wire.RunFile{
 		RunID:      opt.ID,
 		WindowName: opt.WindowName,
-		Meta:       Meta(res.Spec, res.Steps[0].Time, res.Steps[last].Time, len(res.Steps), opt),
+		Meta:       Meta(res.Spec, res.Options, res.Steps[0].Time, res.Steps[last].Time, len(res.Steps), opt),
 		Steps:      map[string]wire.StepDecision{},
 	}
 	var ticker Ticker
@@ -169,9 +217,11 @@ func Build(res *simulate.Result, opt Options) (wire.RunFile, error) {
 	return run, nil
 }
 
-func bill(total, cash, clipped, throughput, imp, exp float64) wire.Bill {
-	return wire.Bill{BillAud: round(total, 4), EnergyCashAud: round(cash, 4), ClippedKwh: round(clipped, 4),
-		ThroughputAcKwh: round(throughput, 4), GridImportKwh: round(imp, 4), GridExportKwh: round(exp, 4)}
+func bill(b battery.Bill, wear float64) wire.Bill {
+	w := wear * b.Throughput()
+	return wire.Bill{BillAud: round(b.BillAUD+w, 4), EnergyCashAud: round(b.EnergyCashAUD, 4), ClippedKwh: round(b.Clipped, 4),
+		ThroughputAcKwh: round(b.Throughput(), 4), GridImportKwh: round(b.GridImport, 4), GridExportKwh: round(b.GridExport, 4),
+		WearAud: round(w, 4)}
 }
 
 // Write writes the run as compact JSON to dir/<run_id>.json, replacing any existing file only
